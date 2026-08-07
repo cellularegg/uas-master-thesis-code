@@ -1,0 +1,44 @@
+minimum_pre_commit_version: "4.6.1"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-toml
+      - id: check-ast
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: Format Python with Ruff
+        entry: uv run --frozen ruff format
+        language: system
+        files: ^(src|tests)/.*\.py$|^main\.py$
+        types: [python]
+
+      - id: ruff-check
+        name: Lint Python with Ruff
+        entry: uv run --frozen ruff check --fix
+        language: system
+        files: ^(src|tests)/.*\.py$|^main\.py$
+        types: [python]
+
+      - id: mypy
+        name: Type-check application and tests
+        entry: uv run --frozen mypy src tests
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: pytest
+        name: Run tests
+        entry: uv run --frozen pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
