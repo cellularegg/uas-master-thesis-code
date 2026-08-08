@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any, Protocol
 
 import openmeteo_requests
@@ -255,25 +252,6 @@ def resolve_station_coordinates(
         ("longitude", "lon", "lng", "location_longitude", "position_longitude"),
     )
     return float(match.iloc[0][latitude_column]), float(match.iloc[0][longitude_column])
-
-
-def write_parquet_atomically(frame: pd.DataFrame, destination: Path) -> None:
-    """Write a DataFrame to a parquet file via a temp file and atomic rename."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            prefix=f".{destination.name}.",
-            suffix=".tmp",
-            dir=destination.parent,
-            delete=False,
-        ) as temporary:
-            temporary_path = Path(temporary.name)
-        frame.to_parquet(temporary_path, index=False)
-        os.replace(temporary_path, destination)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
 
 
 def summarize_failures(failures: Mapping[str, BaseException]) -> str:

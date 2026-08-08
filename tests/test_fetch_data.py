@@ -1,5 +1,4 @@
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -11,7 +10,6 @@ from src.fetch_data import (
     flatten_station_catalog,
     hourly_chunks,
     resolve_station_coordinates,
-    write_parquet_atomically,
     yearly_date_chunks,
 )
 
@@ -271,20 +269,3 @@ def test_catalog_flattens_scalars_and_resolves_coordinates() -> None:
 
     assert "measurements" not in catalog
     assert resolve_station_coordinates(catalog, "207241-at") == (47.1, 14.2)
-
-
-def test_atomic_write_does_not_replace_existing_file_on_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    destination = tmp_path / "data.parquet"
-    destination.write_bytes(b"valid-existing-data")
-
-    def fail_write(self: pd.DataFrame, path: Path, *, index: bool) -> None:
-        raise RuntimeError("simulated incomplete write")
-
-    monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_write)
-    with pytest.raises(RuntimeError, match="incomplete"):
-        write_parquet_atomically(pd.DataFrame({"x": [1]}), destination)
-
-    assert destination.read_bytes() == b"valid-existing-data"
-    assert list(tmp_path.iterdir()) == [destination]
