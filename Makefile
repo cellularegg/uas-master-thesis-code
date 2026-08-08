@@ -24,14 +24,14 @@ clean:
 ## Lint using ruff (use `make format` to do formatting)
 .PHONY: lint
 lint:
-	uv run ruff format --check
-	uv run ruff check
+	ruff format --check
+	ruff check
 
 ## Format source code with ruff
 .PHONY: format
 format:
-	uv run ruff check --fix
-	uv run ruff format
+	ruff check --fix
+	ruff format
 
 ## Run tests
 .PHONY: test
