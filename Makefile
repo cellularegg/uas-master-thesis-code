@@ -92,6 +92,11 @@ evaluate:
 model_selection: evaluate
 	uv run jupyter execute --inplace 06_model_selection.ipynb
 
+## Launch the MLflow UI backed by a local SQLite store
+.PHONY: mlflowui
+mlflowui:
+	uv run mlflow server --backend-store-uri sqlite:///mlflow.db
+
 #################################################################################
 # Self Documenting Commands                                                     #
 #################################################################################

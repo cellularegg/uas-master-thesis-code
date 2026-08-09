@@ -1,8 +1,12 @@
 """Shared MLflow logging interface for training notebooks.
 
-Logs params/metrics only (no model artifacts) to the local file store
-in ./mlruns/. Trained models are saved separately to ./models/.
+Logs params/metrics only (no model artifacts) to a local SQLite store
+(./mlflow.db). Trained models are saved separately to ./models/.
 """
+
+import mlflow
+
+mlflow.set_tracking_uri("sqlite:///mlflow.db")
 
 
 def set_experiment(name: str) -> None:

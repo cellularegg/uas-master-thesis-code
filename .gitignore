@@ -21,6 +21,7 @@ data/processed/*
 models/*
 !models/.gitkeep
 mlruns/
+mlflow.db
 .env
 
 .DS_Store
