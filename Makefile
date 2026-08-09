@@ -78,9 +78,14 @@ train-persistence: features
 train-ridge: features
 	uv run jupyter execute --inplace 04_train_ridge.ipynb
 
+## Train the MLP regression model
+.PHONY: train-mlp
+train-mlp: features
+	uv run jupyter execute --inplace 04_train_mlp.ipynb
+
 ## Train all models
 .PHONY: train
-train: train-persistence train-ridge
+train: train-persistence train-ridge train-mlp
 
 ## Evaluate trained models (assumes `make train` has already been run)
 .PHONY: evaluate

@@ -21,7 +21,7 @@ forecasting 24 hours ahead.
 
 Run the notebooks directly, or use the equivalent `make` target. The current
 Make dependencies are intentionally asymmetric: `make features` depends on
-`make data`, and either training target therefore re-runs fetching,
+`make data`, and any stage-4 training target therefore re-runs fetching,
 preprocessing, and feature engineering. `make evaluate` does not depend on
 training, while `make model_selection` re-runs evaluation first.
 
@@ -32,15 +32,16 @@ training, while `make model_selection` re-runs evaluation first.
 | 3 | `03_feature_engineering.ipynb` | `make features` (runs 01 + 02 + 03) | `data/processed/` |
 | 4 | `04_train_persistence.ipynb` | `make train-persistence` | in-notebook test predictions and metrics |
 | 4 | `04_train_ridge.ipynb` | `make train-ridge` | in-notebook test predictions and metrics |
-| — | (both of the above) | `make train` | — |
+| 4 | `04_train_mlp.ipynb` | `make train-mlp` | in-notebook test predictions and metrics |
+| — | (all three of the above) | `make train` | — |
 | 5 | `05_evaluate.ipynb` | `make evaluate` | comparison plots/tables |
 | 6 | `06_model_selection.ipynb` | `make model_selection` (runs 05 + 06) | selected model/run |
 
-`04_train_persistence.ipynb` / `04_train_ridge.ipynb` share stage number 4:
-they're parallel model candidates, not sequential steps. `make evaluate` and
-`make model_selection` assume `make train` has already been run — run the
-full pipeline top to bottom with `make data features train evaluate
-model_selection` if you're starting from scratch.
+`04_train_persistence.ipynb`, `04_train_ridge.ipynb`, and
+`04_train_mlp.ipynb` share stage number 4: they're parallel model candidates,
+not sequential steps. `make evaluate` and `make model_selection` assume `make train`
+has already been run. If you're starting from scratch, run the full pipeline top
+to bottom with `make data features train evaluate model_selection`.
 
 The stage-4 MVP displays predictions and MAE/RMSE metrics in the notebooks. It
 does not perform model selection, MLflow logging, or write trained-model or
