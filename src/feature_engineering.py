@@ -7,7 +7,6 @@ import json
 import math
 import os
 import platform
-import re
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,12 +19,10 @@ import pandas as pd
 from pandas.api.types import is_bool_dtype
 
 from src.config import FORECAST_HORIZON_HOURS, WEATHER_VARIABLES
-from src.split_folds import calculate_target_eligibility
 
 WATER_LEVEL_CHANGE_HOURS = (1, 3, 6, 12, 24)
 PRECIPITATION_VARIABLES = ("precipitation",)
 TEMPERATURE_VARIABLE = "temperature_2m"
-FOLD_ROLE_PATTERN = re.compile(r"^fold_\d{2}_role$")
 
 
 @dataclass(frozen=True)
@@ -38,7 +35,7 @@ class FeatureConfig:
     rolling_windows: tuple[int, ...] = (6, 24, 72, 168)
 
     def __post_init__(self) -> None:
-        """Reject values that cannot define the stage-04 feature contract."""
+        """Reject values that cannot define the stage-03 feature contract."""
         if self.horizon_hours < 1:
             raise ValueError("horizon_hours must be at least 1")
         if self.calendar_timezone != "UTC":
@@ -108,15 +105,43 @@ def target_column_names(
     )
 
 
+def calculate_target_eligibility(
+    frame: pd.DataFrame, *, horizon_hours: int = FORECAST_HORIZON_HOURS
+) -> pd.Series:
+    """Identify issue times whose complete future target window is observed.
+
+    Args:
+        frame: Chronologically ordered observations containing ``water_level`` and
+            ``imputed``.
+        horizon_hours: Number of future hourly targets required per issue time.
+
+    Returns:
+        A Boolean Series aligned with ``frame.index``.
+
+    Raises:
+        ValueError: If the horizon is not positive.
+    """
+    if horizon_hours < 1:
+        raise ValueError("horizon_hours must be at least 1")
+    observed = frame["water_level"].notna() & ~frame["imputed"]
+    future_observed = observed.shift(-1)
+    valid_count = (
+        future_observed.iloc[::-1]
+        .rolling(horizon_hours, min_periods=horizon_hours)
+        .sum()
+        .iloc[::-1]
+    )
+    return valid_count.eq(horizon_hours).astype(bool).rename("target_valid")
+
+
 def _validate_feature_input(
     frame: pd.DataFrame, *, station_id: str, config: FeatureConfig
-) -> tuple[str, ...]:
+) -> None:
     required = {
         "timestamp",
         "water_level",
         "imputed",
         "station_id",
-        "target_valid",
         *WEATHER_VARIABLES,
     }
     missing = sorted(required.difference(frame.columns))
@@ -147,34 +172,6 @@ def _validate_feature_input(
         )
     if not is_bool_dtype(frame["imputed"].dtype) or frame["imputed"].isna().any():
         raise ValueError("imputed must be a non-null Boolean column")
-    if (
-        not is_bool_dtype(frame["target_valid"].dtype)
-        or frame["target_valid"].isna().any()
-    ):
-        raise ValueError("target_valid must be a non-null Boolean column")
-
-    role_columns = tuple(
-        column for column in frame.columns if FOLD_ROLE_PATTERN.fullmatch(column)
-    )
-    non_categorical = [
-        column
-        for column in role_columns
-        if not isinstance(frame[column].dtype, pd.CategoricalDtype)
-    ]
-    if non_categorical:
-        raise ValueError(f"fold-role columns must be categorical: {non_categorical}")
-
-    expected_valid = calculate_target_eligibility(
-        frame, horizon_hours=config.horizon_hours
-    )
-    actual_valid = frame["target_valid"].astype(bool)
-    disagreement = actual_valid.to_numpy() != expected_valid.to_numpy()
-    if disagreement.any():
-        count = int(disagreement.sum())
-        raise ValueError(
-            f"target_valid disagrees with recalculated eligibility for {count} rows"
-        )
-    return role_columns
 
 
 def build_feature_frame(
@@ -190,13 +187,13 @@ def build_feature_frame(
     configured horizon; the full vector is blanked for ineligible issue times.
 
     Args:
-        frame: One development or sealed-test station artifact.
+        frame: One train or sealed-test station artifact.
         station_id: Expected identifier for every row.
         config: Feature and target configuration.
 
     Returns:
-        A copy containing every original row and column, followed by engineered
-        predictors and the ordered target vector.
+        A copy containing every original row and column, target eligibility,
+        engineered predictors, and the ordered target vector.
 
     Raises:
         ValueError: If the physical artifact violates the input contract.
@@ -204,6 +201,10 @@ def build_feature_frame(
     _validate_feature_input(frame, station_id=station_id, config=config)
     result = frame.copy(deep=True)
     water_level = frame["water_level"]
+    valid_targets = calculate_target_eligibility(
+        frame, horizon_hours=config.horizon_hours
+    )
+    result["target_valid"] = valid_targets
 
     for hours in config.lag_hours:
         result[f"water_level_lag_{hours}h"] = water_level.shift(hours)
@@ -254,7 +255,6 @@ def build_feature_frame(
     result["utc_day_of_year_sin"] = np.sin(year_angle)
     result["utc_day_of_year_cos"] = np.cos(year_angle)
 
-    valid_targets = frame["target_valid"]
     for offset, column in enumerate(target_column_names(config), start=1):
         result[column] = water_level.shift(-offset).where(valid_targets)
 
@@ -300,8 +300,8 @@ def _validate_output_against_source(
     label: str,
     station_id: str,
     config: FeatureConfig,
-) -> tuple[str, ...]:
-    role_columns = _validate_feature_input(source, station_id=station_id, config=config)
+) -> None:
+    _validate_feature_input(source, station_id=station_id, config=config)
     missing = sorted(
         set(feature_column_names(config) + target_column_names(config)).difference(
             features.columns
@@ -316,7 +316,11 @@ def _validate_output_against_source(
     for column in source.columns:
         if not features[column].equals(source[column]):
             raise ValueError(f"{label} features changed original column {column!r}")
-    return role_columns
+    expected_valid = calculate_target_eligibility(
+        source, horizon_hours=config.horizon_hours
+    )
+    if not features["target_valid"].equals(expected_valid):
+        raise ValueError(f"{label} features have incorrect target eligibility")
 
 
 def write_feature_artifacts(
@@ -332,11 +336,11 @@ def write_feature_artifacts(
     """Replace station feature Parquets and write their lineage manifest.
 
     Args:
-        train_features: Independently calculated development feature frame.
+        train_features: Independently calculated train feature frame.
         test_features: Independently calculated sealed-test feature frame.
         station_id: Identifier used in artifact paths and metadata.
-        train_source_path: Stage-03 development Parquet.
-        test_source_path: Stage-03 sealed-test Parquet.
+        train_source_path: Stage-02 train Parquet.
+        test_source_path: Stage-02 sealed-test Parquet.
         output_dir: Destination directory for the feature artifacts.
         config: Feature and target configuration.
 
@@ -352,14 +356,14 @@ def write_feature_artifacts(
             raise FileNotFoundError(source_path)
     train_source = pd.read_parquet(train_source_path)
     test_source = pd.read_parquet(test_source_path)
-    train_roles = _validate_output_against_source(
+    _validate_output_against_source(
         train_features,
         train_source,
         label="train",
         station_id=station_id,
         config=config,
     )
-    test_roles = _validate_output_against_source(
+    _validate_output_against_source(
         test_features,
         test_source,
         label="test",
@@ -387,18 +391,14 @@ def write_feature_artifacts(
         },
         "predictor_columns": list(feature_column_names(config)),
         "target_columns": list(target_column_names(config)),
-        "fold_role_columns": {
-            "train": list(train_roles),
-            "test": list(test_roles),
-        },
         "semantics": {
             "issue_time": "Predictors use information available through timestamp t.",
             "rolling": "Trailing windows include t, require every source value, and never read future rows.",
             "target": "water_level at t+1 through t+horizon_hours; the full vector is null unless target_valid is true.",
-            "physical_independence": "Development and sealed-test features are calculated separately; unavailable lookback rows remain null.",
+            "physical_independence": "Train and sealed-test features are calculated separately; unavailable lookback rows remain null.",
         },
         "inputs": {
-            "train_splits": _frame_profile(train_source, train_source_path),
+            "train": _frame_profile(train_source, train_source_path),
             "test": _frame_profile(test_source, test_source_path),
         },
         "artifacts": {

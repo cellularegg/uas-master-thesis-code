@@ -14,11 +14,11 @@ from src.feature_engineering import (
     DEFAULT_FEATURE_CONFIG,
     FeatureConfig,
     build_feature_frame,
+    calculate_target_eligibility,
     feature_column_names,
     target_column_names,
     write_feature_artifacts,
 )
-from src.split_folds import calculate_target_eligibility
 
 
 def _station_frame(
@@ -27,7 +27,6 @@ def _station_frame(
     station_id: str = "station-at",
     start: str = "2024-01-01",
     water_offset: float = 0.0,
-    with_roles: bool = True,
 ) -> pd.DataFrame:
     values = np.arange(rows, dtype=float)
     frame = pd.DataFrame(
@@ -40,12 +39,6 @@ def _station_frame(
             "temperature_2m": (280.0 + values).astype("float32"),
         }
     )
-    frame["target_valid"] = calculate_target_eligibility(frame)
-    if with_roles:
-        frame["fold_01_role"] = pd.Categorical(
-            np.where(values < rows / 2, "train", "validation"),
-            categories=["train", "embargo", "validation", "future"],
-        )
     return frame
 
 
@@ -77,7 +70,6 @@ def test_column_helpers_define_the_complete_stable_contract() -> None:
 def test_builds_exact_lag_change_rolling_weather_and_calendar_values() -> None:
     frame = _station_frame()
     frame.loc[160, "imputed"] = True
-    frame["target_valid"] = calculate_target_eligibility(frame)
 
     result = build_feature_frame(frame, station_id="station-at")
     row = result.iloc[180]
@@ -122,11 +114,26 @@ def test_targets_point_forward_and_invalid_anchors_have_blank_vectors() -> None:
     assert result.loc[196:, targets].isna().all(axis=None)
 
 
+def test_target_eligibility_requires_observed_non_imputed_future_values() -> None:
+    frame = _station_frame(rows=80)
+    frame.loc[10, "water_level"] = np.nan
+    frame.loc[30, "imputed"] = True
+
+    eligible = calculate_target_eligibility(frame)
+    result = build_feature_frame(frame, station_id="station-at")
+
+    assert not eligible.iloc[:10].any()
+    assert not eligible.iloc[6:30].any()
+    assert eligible.iloc[30]
+    assert eligible.iloc[40:56].all()
+    assert not eligible.iloc[-24:].any()
+    pd.testing.assert_series_equal(result["target_valid"], eligible)
+
+
 def test_incomplete_or_missing_lookbacks_remain_nan_without_dropping_rows() -> None:
     frame = _station_frame()
     frame.loc[10, "water_level"] = np.nan
     frame.loc[20, "precipitation"] = np.nan
-    frame["target_valid"] = calculate_target_eligibility(frame)
 
     result = build_feature_frame(frame, station_id="station-at")
 
@@ -151,9 +158,11 @@ def test_physical_artifacts_are_transformed_independently() -> None:
         10_002.5
     )
     assert train_features.iloc[-1]["water_level"] == 219.0
+    assert not train_features["target_valid"].iloc[-24:].any()
+    assert not test_features["target_valid"].iloc[-24:].any()
 
 
-def test_original_columns_dtypes_categories_rows_and_index_are_preserved() -> None:
+def test_original_columns_dtypes_rows_and_index_are_preserved() -> None:
     frame = _station_frame()
     frame.index = pd.Index(range(1000, 1220), name="source_row")
     original = frame.copy(deep=True)
@@ -163,7 +172,7 @@ def test_original_columns_dtypes_categories_rows_and_index_are_preserved() -> No
     assert result.index.equals(original.index)
     assert result.columns[: len(original.columns)].tolist() == original.columns.tolist()
     pd.testing.assert_frame_equal(result[original.columns], original)
-    assert isinstance(result["fold_01_role"].dtype, pd.CategoricalDtype)
+    assert result.columns[len(original.columns)] == "target_valid"
     assert "features_valid" not in result
 
 
@@ -184,14 +193,6 @@ def test_original_columns_dtypes_categories_rows_and_index_are_preserved() -> No
                 station_id=np.where(frame.index == 0, "other", "station-at")
             ),
             "one station",
-        ),
-        (
-            lambda frame: frame.assign(target_valid=~frame["target_valid"]),
-            "disagrees",
-        ),
-        (
-            lambda frame: frame.assign(fold_01_role=frame["fold_01_role"].astype(str)),
-            "categorical",
         ),
     ],
 )
@@ -222,11 +223,11 @@ def test_write_artifacts_replaces_files_and_records_complete_lineage(
     tmp_path: Path,
 ) -> None:
     station_id = "station-at"
-    train_source_path = tmp_path / f"{station_id}_train_splits.parquet"
+    train_source_path = tmp_path / f"{station_id}_train.parquet"
     test_source_path = tmp_path / f"{station_id}_test.parquet"
     output_dir = tmp_path / "processed"
     train = _station_frame(start="2024-01-01")
-    test = _station_frame(start="2024-02-01", with_roles=False)
+    test = _station_frame(start="2024-02-01")
     train.to_parquet(train_source_path, index=False)
     test.to_parquet(test_source_path, index=False)
     train_features = build_feature_frame(train, station_id=station_id)
@@ -260,16 +261,13 @@ def test_write_artifacts_replaces_files_and_records_complete_lineage(
     assert persisted_metadata == repeated
     assert metadata["schema_version"] == "1.0"
     assert first_hashes == (_sha256(train_path), _sha256(test_path))
-    assert metadata["inputs"]["train_splits"]["sha256"] == _sha256(train_source_path)
+    assert metadata["inputs"]["train"]["sha256"] == _sha256(train_source_path)
     assert metadata["inputs"]["test"]["sha256"] == _sha256(test_source_path)
     assert metadata["artifacts"]["train_features"]["sha256"] == _sha256(train_path)
     assert metadata["artifacts"]["test_features"]["sha256"] == _sha256(test_path)
     assert metadata["predictor_columns"] == list(feature_column_names())
     assert metadata["target_columns"] == list(target_column_names())
-    assert metadata["fold_role_columns"] == {
-        "train": ["fold_01_role"],
-        "test": [],
-    }
+    assert "fold_role_columns" not in metadata
     assert metadata["artifacts"]["train_features"]["rows"] == len(train)
     assert metadata["artifacts"]["test_features"]["null_counts"] == {
         column: int(count)
@@ -278,7 +276,7 @@ def test_write_artifacts_replaces_files_and_records_complete_lineage(
     assert metadata["generator"]["sha256"] == _sha256(
         Path("src/feature_engineering.py")
     )
-    assert not Path(metadata["inputs"]["train_splits"]["path"]).is_absolute()
+    assert not Path(metadata["inputs"]["train"]["path"]).is_absolute()
 
 
 def test_writer_rejects_features_that_change_the_source_contract(
@@ -288,7 +286,7 @@ def test_writer_rejects_features_that_change_the_source_contract(
     train_path = tmp_path / "train.parquet"
     test_path = tmp_path / "test.parquet"
     train = _station_frame()
-    test = _station_frame(start="2024-02-01", with_roles=False)
+    test = _station_frame(start="2024-02-01")
     train.to_parquet(train_path, index=False)
     test.to_parquet(test_path, index=False)
     train_features = build_feature_frame(train, station_id=station_id)
@@ -307,7 +305,7 @@ def test_writer_rejects_features_that_change_the_source_contract(
 
 
 def test_writer_requires_both_source_artifacts(tmp_path: Path) -> None:
-    frame = _station_frame(with_roles=False)
+    frame = _station_frame()
     features = build_feature_frame(frame, station_id="station-at")
 
     with pytest.raises(FileNotFoundError):

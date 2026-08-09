@@ -63,21 +63,20 @@ data: requirements
 	uv run jupyter execute --inplace 01_fetch_data.ipynb
 	uv run jupyter execute --inplace 02_preprocessing.ipynb
 
-## Split folds and build features
+## Build features (the data dependency re-runs fetch and preprocessing first)
 .PHONY: features
 features: data
-	uv run jupyter execute --inplace 03_split_folds.ipynb
-	uv run jupyter execute --inplace 04_feature_engineering.ipynb
+	uv run jupyter execute --inplace 03_feature_engineering.ipynb
 
 ## Train the persistence baseline
 .PHONY: train-persistence
 train-persistence: features
-	uv run jupyter execute --inplace 05_train_persistence.ipynb
+	uv run jupyter execute --inplace 04_train_persistence.ipynb
 
 ## Train the Ridge regression model
 .PHONY: train-ridge
 train-ridge: features
-	uv run jupyter execute --inplace 05_train_ridge.ipynb
+	uv run jupyter execute --inplace 04_train_ridge.ipynb
 
 ## Train all models
 .PHONY: train
@@ -86,12 +85,12 @@ train: train-persistence train-ridge
 ## Evaluate trained models (assumes `make train` has already been run)
 .PHONY: evaluate
 evaluate:
-	uv run jupyter execute --inplace 06_evaluate.ipynb
+	uv run jupyter execute --inplace 05_evaluate.ipynb
 
 ## Select the winning model/run
 .PHONY: model_selection
 model_selection: evaluate
-	uv run jupyter execute --inplace 07_model_selection.ipynb
+	uv run jupyter execute --inplace 06_model_selection.ipynb
 
 #################################################################################
 # Self Documenting Commands                                                     #

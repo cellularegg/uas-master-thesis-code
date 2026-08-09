@@ -19,24 +19,24 @@ forecasting 24 hours ahead.
 
 ## Notebook run order
 
-Run the notebooks directly, or use the equivalent `make` target (each target
-runs the notebooks for its own stage only — it does **not** re-run earlier
-stages, since re-fetching data or retraining models can take a while and
-shouldn't happen just because you want to re-run evaluation):
+Run the notebooks directly, or use the equivalent `make` target. The current
+Make dependencies are intentionally asymmetric: `make features` depends on
+`make data`, and either training target therefore re-runs fetching,
+preprocessing, and feature engineering. `make evaluate` does not depend on
+training, while `make model_selection` re-runs evaluation first.
 
 | # | Notebook | `make` target | Output |
 |---|----------|----------------|--------|
 | 1 | `01_fetch_data.ipynb` | `make data` (runs 01 + 02) | `data/raw/` |
-| 2 | `02_preprocessing.ipynb` | ↑ | `data/interim/` |
-| 3 | `03_split_folds.ipynb` | `make features` (runs 03 + 04) | `data/processed/` |
-| 4 | `04_feature_engineering.ipynb` | ↑ | `data/processed/` |
-| 5 | `05_train_persistence.ipynb` | `make train-persistence` | MLflow run, `models/` |
-| 5 | `05_train_ridge.ipynb` | `make train-ridge` | MLflow run, `models/` |
+| 2 | `02_preprocessing.ipynb` | ↑ | chronological train/test artifacts in `data/processed/` |
+| 3 | `03_feature_engineering.ipynb` | `make features` (runs 01 + 02 + 03) | `data/processed/` |
+| 4 | `04_train_persistence.ipynb` | `make train-persistence` | MLflow run, `models/` |
+| 4 | `04_train_ridge.ipynb` | `make train-ridge` | MLflow run, `models/` |
 | — | (both of the above) | `make train` | — |
-| 6 | `06_evaluate.ipynb` | `make evaluate` | comparison plots/tables |
-| 7 | `07_model_selection.ipynb` | `make model_selection` (runs 06 + 07) | selected model/run |
+| 5 | `05_evaluate.ipynb` | `make evaluate` | comparison plots/tables |
+| 6 | `06_model_selection.ipynb` | `make model_selection` (runs 05 + 06) | selected model/run |
 
-`05_train_persistence.ipynb` / `05_train_ridge.ipynb` share stage number 5:
+`04_train_persistence.ipynb` / `04_train_ridge.ipynb` share stage number 4:
 they're parallel model candidates, not sequential steps. `make evaluate` and
 `make model_selection` assume `make train` has already been run — run the
 full pipeline top to bottom with `make data features train evaluate

@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
+import os
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
+
+from src.config import TEST_FRACTION
 
 
 def clean_water_level(raw: pd.DataFrame, *, max_gap_hours: int) -> pd.DataFrame:
@@ -96,3 +104,166 @@ def preprocess_station(
 
     water = clean_water_level(water_raw, max_gap_hours=max_gap_hours)
     return merge_weather(water, weather_raw, variables=weather_variables).reset_index()
+
+
+def _validate_hourly_station_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return a sorted copy after validating one contiguous hourly UTC station."""
+    missing = sorted({"timestamp", "station_id"}.difference(frame.columns))
+    if missing:
+        raise ValueError(f"missing required columns: {missing}")
+    if frame.empty:
+        raise ValueError("station timeline is empty")
+
+    timestamp_dtype = frame["timestamp"].dtype
+    if (
+        not isinstance(timestamp_dtype, pd.DatetimeTZDtype)
+        or str(timestamp_dtype.tz) != "UTC"
+    ):
+        raise ValueError("timestamp must be timezone-aware UTC")
+
+    ordered = frame.sort_values("timestamp").reset_index(drop=True)
+    if ordered["timestamp"].duplicated().any():
+        raise ValueError("timestamps must be unique")
+    expected_grid = pd.date_range(
+        ordered["timestamp"].iloc[0], periods=len(ordered), freq="h"
+    )
+    if not pd.DatetimeIndex(ordered["timestamp"]).equals(expected_grid):
+        raise ValueError("timestamps must form a contiguous hourly grid")
+
+    station_ids = ordered["station_id"].drop_duplicates().tolist()
+    if len(station_ids) != 1 or pd.isna(station_ids[0]):
+        raise ValueError(
+            f"frame must contain exactly one non-null station; got {station_ids!r}"
+        )
+    return ordered
+
+
+def split_train_test(
+    frame: pd.DataFrame, test_fraction: float = TEST_FRACTION
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split one hourly station timeline into chronological train and test rows.
+
+    Args:
+        frame: Preprocessed observations for exactly one station.
+        test_fraction: Fraction assigned to the sealed tail partition.
+
+    Returns:
+        Independent train and test DataFrames with fresh row indexes.
+
+    Raises:
+        TypeError: If the fraction is not numeric.
+        ValueError: If the fraction or station timeline is invalid, or if either
+            resulting partition would be empty.
+    """
+    if isinstance(test_fraction, bool) or not isinstance(test_fraction, (int, float)):
+        raise TypeError("test_fraction must be a finite number between 0 and 1")
+    if not math.isfinite(test_fraction) or not 0.0 < test_fraction < 1.0:
+        raise ValueError("test_fraction must be between 0 and 1")
+
+    ordered = _validate_hourly_station_frame(frame)
+    train_size = math.floor((1.0 - test_fraction) * len(ordered))
+    if train_size == 0 or train_size == len(ordered):
+        raise ValueError(
+            "test_fraction must produce non-empty train and test partitions"
+        )
+    train = ordered.iloc[:train_size].reset_index(drop=True)
+    test = ordered.iloc[train_size:].reset_index(drop=True)
+    return train, test
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _relative_path(path: Path) -> str:
+    return os.path.relpath(path.resolve(), Path.cwd().resolve())
+
+
+def _utc_text(value: pd.Timestamp) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _frame_profile(frame: pd.DataFrame, path: Path) -> dict[str, Any]:
+    return {
+        "path": _relative_path(path),
+        "sha256": _sha256(path),
+        "rows": len(frame),
+        "schema": {column: str(dtype) for column, dtype in frame.dtypes.items()},
+        "timestamp_range": {
+            "start_utc": _utc_text(frame["timestamp"].iloc[0]),
+            "end_utc": _utc_text(frame["timestamp"].iloc[-1]),
+        },
+    }
+
+
+def write_preprocess_artifacts(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    *,
+    station_id: str,
+    output_dir: Path,
+    test_fraction: float = TEST_FRACTION,
+) -> dict[str, Any]:
+    """Write chronological preprocessing artifacts and their lineage manifest.
+
+    Args:
+        train: Chronological leading partition returned by :func:`split_train_test`.
+        test: Sealed trailing partition returned by :func:`split_train_test`.
+        station_id: Identifier used in artifact names and metadata.
+        output_dir: Destination directory for the three artifacts.
+        test_fraction: Fraction used to create the supplied partitions.
+
+    Returns:
+        The metadata dictionary written to JSON.
+
+    Raises:
+        ValueError: If the partitions do not reconstruct a valid split for the
+            station and fraction.
+    """
+    combined = pd.concat([train, test], ignore_index=True)
+    expected_train, expected_test = split_train_test(combined, test_fraction)
+    if not train.reset_index(drop=True).equals(expected_train):
+        raise ValueError("train does not match the chronological split contract")
+    if not test.reset_index(drop=True).equals(expected_test):
+        raise ValueError("test does not match the chronological split contract")
+    if expected_train["station_id"].iloc[0] != station_id:
+        raise ValueError("partition station identifier does not match station_id")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    train_path = output_dir / f"{station_id}_train.parquet"
+    test_path = output_dir / f"{station_id}_test.parquet"
+    metadata_path = output_dir / f"{station_id}_preprocess_metadata.json"
+    expected_train.to_parquet(train_path, index=False)
+    expected_test.to_parquet(test_path, index=False)
+
+    generator_path = Path(__file__)
+    metadata: dict[str, Any] = {
+        "schema_version": "1.0",
+        "generated_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "station_id": station_id,
+        "configuration": {
+            "test_fraction": test_fraction,
+            "split_rule": "first floor((1-test_fraction)*N) rows are train; the remainder is sealed test data",
+        },
+        "rows": {
+            "total": len(combined),
+            "train": len(expected_train),
+            "test": len(expected_test),
+        },
+        "artifacts": {
+            "train": _frame_profile(expected_train, train_path),
+            "test": _frame_profile(expected_test, test_path),
+        },
+        "generator": {
+            "module": _relative_path(generator_path),
+            "sha256": _sha256(generator_path),
+        },
+    }
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return metadata
