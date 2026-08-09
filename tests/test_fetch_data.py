@@ -3,14 +3,15 @@ from typing import Any
 
 import pandas as pd
 import pytest
+import requests
 
 from src.fetch_data import (
-    fetch_era5,
+    GEOSPHERE_INCA_URL,
     fetch_hourly_history,
+    fetch_inca,
     flatten_station_catalog,
     hourly_chunks,
     resolve_station_coordinates,
-    yearly_date_chunks,
 )
 
 
@@ -32,72 +33,34 @@ class StubPegelApi:
         return next(self.frames)
 
 
-class FakeHourlyVariable:
-    def __init__(self, values: list[float | None]):
-        self.values = values
-
-    def ValuesAsNumpy(self) -> list[float | None]:
-        return self.values
+class FakeResponse:
+    def __init__(self, text: str, status_code: int = 200):
+        self.text = text
+        self.status_code = status_code
 
 
-class FakeHourly:
-    def __init__(self, start: int, end: int, variables: list[list[float | None]]):
-        self.start = start
-        self.end = end
-        self.variables = [FakeHourlyVariable(values) for values in variables]
-
-    def Time(self) -> int:
-        return self.start
-
-    def TimeEnd(self) -> int:
-        return self.end
-
-    def Interval(self) -> int:
-        return 3600
-
-    def VariablesLength(self) -> int:
-        return len(self.variables)
-
-    def Variables(self, index: int) -> FakeHourlyVariable:
-        return self.variables[index]
-
-
-class FakeWeatherResponse:
-    def __init__(self, hourly: FakeHourly | None):
-        self.hourly = hourly
-
-    def Hourly(self) -> FakeHourly | None:
-        return self.hourly
-
-    def Latitude(self) -> float:
-        return 47.1
-
-    def Longitude(self) -> float:
-        return 14.2
-
-    def Elevation(self) -> float:
-        return 500.0
-
-
-class FakeOpenMeteoClient:
-    def __init__(self, responses: list[FakeWeatherResponse]):
+class FakeGeoSphereClient:
+    def __init__(self, responses: list[FakeResponse]):
         self.responses = iter(responses)
-        self.calls: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+        self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    def weather_api(
-        self, url: str, params: dict[str, Any], **kwargs: Any
-    ) -> list[FakeWeatherResponse]:
-        self.calls.append((url, params, kwargs))
-        return [next(self.responses)]
+    def get(self, url: str, **kwargs: Any) -> FakeResponse:
+        self.calls.append((url, kwargs))
+        return next(self.responses)
+
+
+INCA_CSV = """time,RR [kg m-2],T2M [degree_Celsius],lat,lon
+2024-01-01T00:00+00:00,0.0,1.4,47.10029,14.20232
+2024-01-01T01:00+00:00,1.8,1.85,47.10029,14.20232
+2024-01-01T02:00+00:00,2.2,1.9,47.10029,14.20232
+"""
 
 
 def test_hourly_chunks_are_non_overlapping_and_at_most_eight_days() -> None:
     start = datetime(2024, 1, 1, tzinfo=UTC)
     end = datetime(2024, 1, 10, tzinfo=UTC)
 
-    chunks = list(hourly_chunks(start, end))
-
-    assert chunks == [
+    assert list(hourly_chunks(start, end)) == [
         (start, datetime(2024, 1, 8, 23, tzinfo=UTC)),
         (datetime(2024, 1, 9, tzinfo=UTC), end),
     ]
@@ -145,114 +108,143 @@ def test_fetch_hourly_history_ignores_empty_chunks_sorts_and_deduplicates() -> N
     assert result["station_id"].unique().tolist() == ["station-at"]
 
 
-def test_yearly_chunks_do_not_overlap() -> None:
-    assert list(
-        yearly_date_chunks(
-            datetime(2023, 12, 30, 2, tzinfo=UTC),
-            datetime(2025, 1, 2, 3, tzinfo=UTC),
-        )
-    ) == [
-        ("2023-12-30", "2023-12-31"),
-        ("2024-01-01", "2024-12-31"),
-        ("2025-01-01", "2025-01-02"),
-    ]
+def test_fetch_inca_requests_native_parameters_and_maps_csv_columns() -> None:
+    client = FakeGeoSphereClient([FakeResponse(INCA_CSV)])
 
-
-def test_fetch_era5_uses_utc_variables_chunks_and_coordinate_metadata() -> None:
-    client = FakeOpenMeteoClient(
-        [
-            FakeWeatherResponse(
-                FakeHourly(
-                    1704060000,
-                    1704067200,
-                    [[0.0, 1.0], [None, 2.0]],
-                )
-            ),
-            FakeWeatherResponse(
-                FakeHourly(
-                    1704067200,
-                    1704078000,
-                    [[2.0, 3.0, None], [3.0, 4.0, None]],
-                )
-            ),
-        ]
-    )
-    result = fetch_era5(
+    result = fetch_inca(
         "station-at",
         47.0,
         14.0,
-        datetime(2023, 12, 31, 23, tzinfo=UTC),
+        datetime(2024, 1, 1, tzinfo=UTC),
         datetime(2024, 1, 1, 2, tzinfo=UTC),
-        variables=["precipitation", "temperature_2m"],
-        model="era5",
         client=client,
-        show_progress=False,
     )
 
-    assert [(call[1]["start_date"], call[1]["end_date"]) for call in client.calls] == [
-        ("2023-12-31", "2023-12-31"),
-        ("2024-01-01", "2024-01-01"),
+    url, kwargs = client.calls[0]
+    assert url == GEOSPHERE_INCA_URL
+    assert kwargs["params"] == [
+        ("parameters", "RR"),
+        ("parameters", "T2M"),
+        ("start", "2024-01-01T00:00"),
+        ("end", "2024-01-01T02:00"),
+        ("lat_lon", "47.0,14.0"),
+        ("output_format", "csv"),
     ]
-    assert all(call[1]["timezone"] == "GMT" for call in client.calls)
-    assert all(call[1]["models"] == "era5" for call in client.calls)
-    assert all(
-        call[1]["hourly"] == ["precipitation", "temperature_2m"]
-        for call in client.calls
-    )
-    assert all(call[2]["timeout"] == 30 for call in client.calls)
-    assert all(
-        call[0] == "https://archive-api.open-meteo.com/v1/archive"
-        for call in client.calls
-    )
+    assert kwargs["timeout"] == 30
+    assert result.columns.tolist() == [
+        "time",
+        "precipitation",
+        "temperature_2m",
+        "station_id",
+        "requested_latitude",
+        "requested_longitude",
+        "grid_latitude",
+        "grid_longitude",
+        "weather_model",
+    ]
     assert result["time"].tolist() == list(
-        pd.to_datetime(
-            ["2023-12-31T23:00Z", "2024-01-01T00:00Z", "2024-01-01T01:00Z"], utc=True
-        )
+        pd.date_range("2024-01-01", periods=3, freq="h", tz="UTC")
     )
-    assert result["requested_latitude"].unique().tolist() == [47.0]
-    assert result["requested_longitude"].unique().tolist() == [14.0]
-    assert result["grid_latitude"].unique().tolist() == [47.1]
+    assert result["grid_latitude"].unique().tolist() == [47.10029]
+    assert result["grid_longitude"].unique().tolist() == [14.20232]
+    assert result["weather_model"].unique().tolist() == ["inca-v1-1h-1km"]
+    assert "grid_elevation" not in result
 
 
-def test_fetch_era5_uses_default_openmeteo_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = FakeOpenMeteoClient(
-        [FakeWeatherResponse(FakeHourly(1704067200, 1704070800, [[1.0]]))]
-    )
-    monkeypatch.setattr("src.fetch_data.openmeteo_requests.Client", lambda: client)
+def test_fetch_inca_deduplicates_inclusive_response_timestamps() -> None:
+    csv = INCA_CSV + "2024-01-01T02:00+00:00,9.0,9.0,47.10029,14.20232\n"
 
-    result = fetch_era5(
+    result = fetch_inca(
         "station-at",
         47.0,
         14.0,
         datetime(2024, 1, 1, tzinfo=UTC),
-        datetime(2024, 1, 1, tzinfo=UTC),
-        variables=["precipitation"],
-        model="era5",
-        show_progress=False,
+        datetime(2024, 1, 1, 2, tzinfo=UTC),
+        client=FakeGeoSphereClient([FakeResponse(csv)]),
     )
 
-    assert len(result) == 1
-    assert len(client.calls) == 1
+    assert result["precipitation"].tolist() == [0.0, 1.8, 9.0]
 
 
-def test_fetch_era5_rejects_missing_hourly_variables() -> None:
-    client = FakeOpenMeteoClient(
-        [FakeWeatherResponse(FakeHourly(1704067200, 1704070800, [[1.0]]))]
-    )
-
-    with pytest.raises(RuntimeError, match="temperature_2m"):
-        fetch_era5(
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        (
+            FakeResponse("time,RR [kg m-2],lat,lon\n2024-01-01T00:00Z,1,47,14\n"),
+            "missing columns",
+        ),
+        (
+            FakeResponse(
+                "time,RR [kg m-2],T2M [degree_Celsius],lat,lon\nnot-a-time,1,2,47,14\n"
+            ),
+            "invalid timestamps",
+        ),
+        (
+            FakeResponse(
+                "time,RR [kg m-2],T2M [degree_Celsius],lat,lon\n2024-01-01T00:00Z,invalid,2,47,14\n"
+            ),
+            "invalid weather values",
+        ),
+        (
+            FakeResponse("time,RR [kg m-2],T2M [degree_Celsius],lat,lon\n"),
+            "No INCA history",
+        ),
+        (FakeResponse("error", status_code=503), "HTTP 503"),
+    ],
+)
+def test_fetch_inca_rejects_invalid_responses(
+    response: FakeResponse, message: str
+) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        fetch_inca(
             "station-at",
             47.0,
             14.0,
             datetime(2024, 1, 1, tzinfo=UTC),
             datetime(2024, 1, 1, tzinfo=UTC),
-            variables=["precipitation", "temperature_2m"],
-            model="era5",
-            client=client,
-            show_progress=False,
+            client=FakeGeoSphereClient([response]),
+        )
+
+
+def test_fetch_inca_rejects_no_overlap_and_multiple_grid_points() -> None:
+    no_overlap = (
+        "time,RR [kg m-2],T2M [degree_Celsius],lat,lon\n2023-12-31T23:00Z,1,2,47,14\n"
+    )
+    multiple_grid_points = INCA_CSV.replace("47.10029,14.20232", "47.20029,14.20232", 1)
+
+    with pytest.raises(RuntimeError, match="water-data range"):
+        fetch_inca(
+            "station-at",
+            47.0,
+            14.0,
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, tzinfo=UTC),
+            client=FakeGeoSphereClient([FakeResponse(no_overlap)]),
+        )
+    with pytest.raises(RuntimeError, match="multiple grid coordinates"):
+        fetch_inca(
+            "station-at",
+            47.0,
+            14.0,
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, tzinfo=UTC),
+            client=FakeGeoSphereClient([FakeResponse(multiple_grid_points)]),
+        )
+
+
+def test_fetch_inca_wraps_request_exceptions() -> None:
+    class FailingGeoSphereClient:
+        def get(self, url: str, **kwargs: Any) -> None:
+            raise requests.ConnectionError("unavailable")
+
+    with pytest.raises(RuntimeError, match="GeoSphere INCA request failed"):
+        fetch_inca(
+            "station-at",
+            47.0,
+            14.0,
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, tzinfo=UTC),
+            client=FailingGeoSphereClient(),  # type: ignore[arg-type]
         )
 
 

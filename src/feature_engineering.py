@@ -23,13 +23,8 @@ from src.config import FORECAST_HORIZON_HOURS, WEATHER_VARIABLES
 from src.split_folds import calculate_target_eligibility
 
 WATER_LEVEL_CHANGE_HOURS = (1, 3, 6, 12, 24)
-PRECIPITATION_VARIABLES = ("precipitation", "rain", "snowfall")
+PRECIPITATION_VARIABLES = ("precipitation",)
 TEMPERATURE_VARIABLE = "temperature_2m"
-SOIL_MOISTURE_VARIABLES = (
-    "soil_moisture_0_to_7cm",
-    "soil_moisture_7_to_28cm",
-    "soil_moisture_28_to_100cm",
-)
 FOLD_ROLE_PATTERN = re.compile(r"^fold_\d{2}_role$")
 
 
@@ -88,11 +83,6 @@ def feature_column_names(
             f"{TEMPERATURE_VARIABLE}_rolling_min_24h",
             f"{TEMPERATURE_VARIABLE}_rolling_max_24h",
         )
-    )
-    names.extend(
-        f"{variable}_rolling_mean_{window}h"
-        for variable in SOIL_MOISTURE_VARIABLES
-        for window in config.rolling_windows
     )
     names.extend(
         (
@@ -251,12 +241,6 @@ def build_feature_frame(
     result[f"{TEMPERATURE_VARIABLE}_rolling_max_24h"] = temperature.rolling(
         24, min_periods=24
     ).max()
-
-    for variable in SOIL_MOISTURE_VARIABLES:
-        for window in config.rolling_windows:
-            result[f"{variable}_rolling_mean_{window}h"] = (
-                frame[variable].rolling(window, min_periods=window).mean()
-            )
 
     timestamps = frame["timestamp"].dt.tz_convert(config.calendar_timezone)
     hour_angle = 2.0 * math.pi * timestamps.dt.hour / 24.0

@@ -15,15 +15,10 @@ UNIT = "height"
 GRANULARITY = "hour"
 SKIP_IF_EXISTS = True
 
-ERA5_MODEL = "era5"
+INCA_DATASET_ID = "inca-v1-1h-1km"
 WEATHER_VARIABLES = [
     "precipitation",
-    "rain",
-    "snowfall",
     "temperature_2m",
-    "soil_moisture_0_to_7cm",
-    "soil_moisture_7_to_28cm",
-    "soil_moisture_28_to_100cm",
 ]
 
 FORECAST_HORIZON_HOURS = 24

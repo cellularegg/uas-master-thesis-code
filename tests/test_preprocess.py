@@ -65,7 +65,7 @@ def test_merge_weather_keeps_only_requested_variables_and_left_joins() -> None:
             "time": weather_index,
             "temperature_2m": [10.0, 12.0],
             "precipitation": [0.0, 1.0],
-            "weather_model": "era5",
+            "weather_model": "inca-v1-1h-1km",
             "requested_latitude": 47.0,
         }
     )

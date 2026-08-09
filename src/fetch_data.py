@@ -1,27 +1,35 @@
-"""Fetch raw PegelAlarm and ERA5 weather data to local parquet files."""
+"""Fetch raw PegelAlarm and GeoSphere INCA weather data to local parquet files."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
+from io import StringIO
 from typing import Any, Protocol
 
-import openmeteo_requests
 import pandas as pd
+import requests
 from tqdm.auto import tqdm  # type: ignore[import-untyped]
 
 from .basic_api_access import REQUEST_TIMEOUT_SECONDS, BasicApiAccess
+from .config import INCA_DATASET_ID
 
-OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+GEOSPHERE_INCA_URL = (
+    f"https://dataset.api.hub.geosphere.at/v1/timeseries/historical/{INCA_DATASET_ID}"
+)
+INCA_NATIVE_COLUMNS = {
+    "RR [kg m-2]": "precipitation",
+    "T2M [degree_Celsius]": "temperature_2m",
+}
 HOUR = timedelta(hours=1)
 HISTORY_CHUNK = timedelta(days=8)
 
 
-class OpenMeteoClient(Protocol):
-    """Protocol for an Open-Meteo API client, satisfied by openmeteo_requests.Client."""
+class GeoSphereClient(Protocol):
+    """Protocol for the small subset of the requests client used by INCA."""
 
-    def weather_api(self, url: str, params: Any, **kwargs: Any) -> Sequence[Any]:
-        """Fetch weather data for the given URL and parameters."""
+    def get(self, url: str, **kwargs: Any) -> Any:
+        """Fetch a CSV response for the given URL and query parameters."""
         ...
 
 
@@ -122,114 +130,98 @@ def fetch_hourly_history(
     return history
 
 
-def yearly_date_chunks(start: datetime, end: datetime) -> Iterator[tuple[str, str]]:
-    """Yield inclusive, non-overlapping calendar-year date ranges as ISO strings."""
-    start_timestamp = pd.Timestamp(start)
-    end_timestamp = pd.Timestamp(end)
-    if start_timestamp.tz is None or end_timestamp.tz is None:
-        raise ValueError("Open-Meteo history boundaries must be timezone-aware")
-    start_timestamp = start_timestamp.tz_convert("UTC")
-    end_timestamp = end_timestamp.tz_convert("UTC")
-    if start_timestamp > end_timestamp:
-        raise ValueError("Open-Meteo history start must not be after its end")
-
-    current = start_timestamp.date()
-    final = end_timestamp.date()
-    while current <= final:
-        chunk_end = min(current.replace(month=12, day=31), final)
-        yield current.isoformat(), chunk_end.isoformat()
-        current = chunk_end + timedelta(days=1)
-
-
-def fetch_era5(
+def fetch_inca(
     station_id: str,
     latitude: float,
     longitude: float,
     start: datetime,
     end: datetime,
     *,
-    variables: Sequence[str],
-    model: str,
-    client: OpenMeteoClient | None = None,
-    show_progress: bool = True,
+    client: GeoSphereClient | None = None,
 ) -> pd.DataFrame:
-    """Fetch and concatenate ERA5 hourly weather history in yearly chunks."""
-    requested_variables = list(variables)
-    openmeteo_client = client if client is not None else openmeteo_requests.Client()
-    frames: list[pd.DataFrame] = []
-    chunks = list(yearly_date_chunks(start, end))
-    for start_date, end_date in tqdm(
-        chunks, desc=f"ERA5 {station_id}", unit="year", disable=not show_progress
-    ):
-        parameters = {
-            "latitude": latitude,
-            "longitude": longitude,
-            "start_date": start_date,
-            "end_date": end_date,
-            "hourly": requested_variables,
-            "models": model,
-            "timezone": "GMT",
-        }
-        responses = openmeteo_client.weather_api(
-            OPEN_METEO_ARCHIVE_URL,
-            params=parameters,
-            timeout=REQUEST_TIMEOUT_SECONDS,
+    """Fetch hourly INCA analysis data at the nearest grid point to a gauge.
+
+    The GeoSphere API uses inclusive request bounds; duplicate timestamps are
+    therefore removed after parsing before the requested UTC interval is applied.
+    """
+    start_timestamp = _utc_timestamp(start, name="start")
+    end_timestamp = _utc_timestamp(end, name="end")
+    if start_timestamp > end_timestamp:
+        raise ValueError("INCA history start must not be after its end")
+
+    parameters: list[tuple[str, str]] = [
+        ("parameters", "RR"),
+        ("parameters", "T2M"),
+        ("start", start_timestamp.strftime("%Y-%m-%dT%H:%M")),
+        ("end", end_timestamp.strftime("%Y-%m-%dT%H:%M")),
+        ("lat_lon", f"{latitude},{longitude}"),
+        ("output_format", "csv"),
+    ]
+    http_client = client if client is not None else requests
+    try:
+        response = http_client.get(
+            GEOSPHERE_INCA_URL, params=parameters, timeout=REQUEST_TIMEOUT_SECONDS
         )
-        if not responses:
-            raise RuntimeError("Open-Meteo response has no weather data")
+    except requests.RequestException as error:
+        raise RuntimeError("GeoSphere INCA request failed") from error
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"GeoSphere INCA request failed with HTTP {response.status_code}"
+        )
 
-        response = responses[0]
-        hourly = response.Hourly()
-        if hourly is None:
-            raise RuntimeError("Open-Meteo response has no hourly time series")
-        variable_count = hourly.VariablesLength()
-        if variable_count < len(requested_variables):
-            missing = ", ".join(requested_variables[variable_count:])
-            raise RuntimeError(
-                f"Open-Meteo response is missing requested variables: {missing}"
-            )
+    try:
+        weather = pd.read_csv(StringIO(response.text))
+    except (pd.errors.ParserError, UnicodeDecodeError) as error:
+        raise RuntimeError("GeoSphere INCA response is not valid CSV") from error
+    if weather.empty:
+        raise RuntimeError(f"No INCA history found for station {station_id}")
+    required_columns = {"time", "lat", "lon", *INCA_NATIVE_COLUMNS}
+    missing = sorted(required_columns.difference(weather.columns))
+    if missing:
+        raise RuntimeError(f"GeoSphere INCA response is missing columns: {missing}")
 
-        hourly_data: dict[str, Any] = {
-            "time": pd.date_range(
-                start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
-                end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
-                freq=pd.to_timedelta(hourly.Interval(), unit="s"),
-                inclusive="left",
-            )
-        }
-        for index, variable in enumerate(requested_variables):
-            hourly_data[variable] = hourly.Variables(index).ValuesAsNumpy()
+    weather["time"] = pd.to_datetime(weather["time"], utc=True, errors="coerce")
+    if weather["time"].isna().any():
+        raise RuntimeError("GeoSphere INCA response contains invalid timestamps")
+    for native_column in (*INCA_NATIVE_COLUMNS, "lat", "lon"):
+        weather[native_column] = pd.to_numeric(weather[native_column], errors="coerce")
+    if weather[list(INCA_NATIVE_COLUMNS)].isna().any().any():
+        raise RuntimeError("GeoSphere INCA response contains invalid weather values")
+    if weather[["lat", "lon"]].isna().any().any():
+        raise RuntimeError("GeoSphere INCA response contains invalid grid coordinates")
+    grid_coordinates = weather[["lat", "lon"]].drop_duplicates()
+    if len(grid_coordinates) != 1:
+        raise RuntimeError("GeoSphere INCA response contains multiple grid coordinates")
 
-        frame = pd.DataFrame(hourly_data)
-        if frame.empty:
-            continue
-        frame = frame.loc[frame[requested_variables].notna().any(axis=1)].copy()
-        if frame.empty:
-            continue
-        frame["station_id"] = station_id
-        frame["requested_latitude"] = latitude
-        frame["requested_longitude"] = longitude
-        frame["grid_latitude"] = response.Latitude()
-        frame["grid_longitude"] = response.Longitude()
-        frame["grid_elevation"] = response.Elevation()
-        frame["weather_model"] = model
-        frames.append(frame)
-
-    if not frames:
-        raise RuntimeError(f"No ERA5 history found for station {station_id}")
-    weather = pd.concat(frames, ignore_index=True)
-    start_timestamp = pd.Timestamp(start).tz_convert("UTC")
-    end_timestamp = pd.Timestamp(end).tz_convert("UTC")
-    weather = weather.loc[weather["time"].between(start_timestamp, end_timestamp)]
+    weather = weather.rename(columns=INCA_NATIVE_COLUMNS)
+    weather = weather.loc[
+        weather["time"].between(start_timestamp, end_timestamp),
+        ["time", *INCA_NATIVE_COLUMNS.values()],
+    ]
     if weather.empty:
         raise RuntimeError(
-            f"No ERA5 history found in the water-data range for station {station_id}"
+            f"No INCA history found in the water-data range for station {station_id}"
         )
-    return (
+    weather = (
         weather.sort_values("time")
         .drop_duplicates(subset="time", keep="last")
         .reset_index(drop=True)
     )
+    weather["station_id"] = station_id
+    weather["requested_latitude"] = latitude
+    weather["requested_longitude"] = longitude
+    weather["grid_latitude"] = float(grid_coordinates.iloc[0]["lat"])
+    weather["grid_longitude"] = float(grid_coordinates.iloc[0]["lon"])
+    weather["weather_model"] = INCA_DATASET_ID
+    return weather
+
+
+def _utc_timestamp(value: datetime, *, name: str) -> pd.Timestamp:
+    """Convert a timezone-aware boundary to UTC, rejecting naive datetimes."""
+    timestamp = pd.Timestamp(value)
+    if timestamp.tz is None:
+        raise ValueError(f"INCA history {name} must be timezone-aware")
+    return timestamp.tz_convert("UTC")
 
 
 def resolve_station_coordinates(

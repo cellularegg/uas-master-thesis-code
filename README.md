@@ -44,3 +44,16 @@ model_selection` if you're starting from scratch.
 
 Training runs log params/metrics to a local MLflow file store (`./mlruns/`,
 inspect with `uv run mlflow ui`); trained model files are saved to `./models/`.
+
+## Weather source
+
+Historical weather comes exclusively from GeoSphere Austria's
+[INCA hourly analysis dataset](https://data.hub.geosphere.at/en/dataset/inca-v1-1h-1km).
+It provides hourly UTC analyses on a 1 km grid under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). For every gauge the
+pipeline queries the historical timeseries API with the gauge's WGS 84
+coordinates; GeoSphere returns the nearest grid point, whose returned
+coordinates are preserved in the raw artifact. The pipeline uses only the
+native `RR` (one-hour precipitation sum) and `T2M` (2 m air temperature)
+parameters, normalized to `precipitation` and `temperature_2m`; see the
+[timeseries API behavior](https://dataset.api.hub.geosphere.at/v1/docs/user-guide/type.html).

@@ -57,7 +57,7 @@ def merge_weather(
 
     Args:
         water: Output of :func:`clean_water_level`, indexed by ``timestamp``.
-        weather: Raw ERA5 weather history with a ``time`` column plus
+        weather: Raw GeoSphere INCA weather history with a ``time`` column plus
             ``variables`` and other metadata columns.
         variables: Weather columns to keep.
 
@@ -92,7 +92,7 @@ def preprocess_station(
     water_raw = pd.read_parquet(
         raw_dir / f"pegelalarm_{station_id}_height_hour.parquet"
     )
-    weather_raw = pd.read_parquet(raw_dir / f"openmeteo_{station_id}_era5_hour.parquet")
+    weather_raw = pd.read_parquet(raw_dir / f"geosphere_inca_{station_id}_hour.parquet")
 
     water = clean_water_level(water_raw, max_gap_hours=max_gap_hours)
     return merge_weather(water, weather_raw, variables=weather_variables).reset_index()

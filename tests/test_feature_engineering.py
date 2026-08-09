@@ -37,12 +37,7 @@ def _station_frame(
             "imputed": False,
             "station_id": station_id,
             "precipitation": values.astype("float32"),
-            "rain": (2.0 * values).astype("float32"),
-            "snowfall": (0.5 * values).astype("float32"),
             "temperature_2m": (280.0 + values).astype("float32"),
-            "soil_moisture_0_to_7cm": (0.1 + values / 1000).astype("float32"),
-            "soil_moisture_7_to_28cm": (0.2 + values / 1000).astype("float32"),
-            "soil_moisture_28_to_100cm": (0.3 + values / 1000).astype("float32"),
         }
     )
     frame["target_valid"] = calculate_target_eligibility(frame)
@@ -66,7 +61,7 @@ def test_column_helpers_define_the_complete_stable_contract() -> None:
     predictors = feature_column_names()
     targets = target_column_names()
 
-    assert predictors[:9] == ("water_level", "imputed", *WEATHER_VARIABLES)
+    assert predictors[:4] == ("water_level", "imputed", *WEATHER_VARIABLES)
     assert predictors[-6:] == (
         "utc_hour_sin",
         "utc_hour_cos",
@@ -75,7 +70,7 @@ def test_column_helpers_define_the_complete_stable_contract() -> None:
         "utc_day_of_year_sin",
         "utc_day_of_year_cos",
     )
-    assert len(predictors) == len(set(predictors)) == 78
+    assert len(predictors) == len(set(predictors)) == 53
     assert targets == tuple(f"target_t_plus_{hour:02d}" for hour in range(1, 25))
 
 
@@ -98,14 +93,9 @@ def test_builds_exact_lag_change_rolling_weather_and_calendar_values() -> None:
     assert row["water_level_rolling_max_24h"] == 180.0
     assert row["imputed_count_24h"] == 1.0
     assert row["precipitation_rolling_sum_6h"] == sum(range(175, 181))
-    assert row["rain_rolling_sum_6h"] == 2 * sum(range(175, 181))
-    assert row["snowfall_rolling_sum_6h"] == 0.5 * sum(range(175, 181))
     assert row["temperature_2m_rolling_mean_6h"] == pytest.approx(457.5)
     assert row["temperature_2m_rolling_min_24h"] == 437.0
     assert row["temperature_2m_rolling_max_24h"] == 460.0
-    assert row["soil_moisture_0_to_7cm_rolling_mean_6h"] == pytest.approx(
-        np.mean(frame.loc[175:180, "soil_moisture_0_to_7cm"])
-    )
 
     midnight_monday = result.iloc[0]
     assert midnight_monday["utc_hour_sin"] == pytest.approx(0.0)
@@ -180,7 +170,7 @@ def test_original_columns_dtypes_categories_rows_and_index_are_preserved() -> No
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
-        (lambda frame: frame.drop(columns="rain"), "missing required columns"),
+        (lambda frame: frame.drop(columns="precipitation"), "missing required columns"),
         (
             lambda frame: frame.assign(
                 timestamp=frame["timestamp"].dt.tz_localize(None)
