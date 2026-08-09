@@ -30,8 +30,8 @@ training, while `make model_selection` re-runs evaluation first.
 | 1 | `01_fetch_data.ipynb` | `make data` (runs 01 + 02) | `data/raw/` |
 | 2 | `02_preprocessing.ipynb` | ↑ | chronological train/test artifacts in `data/processed/` |
 | 3 | `03_feature_engineering.ipynb` | `make features` (runs 01 + 02 + 03) | `data/processed/` |
-| 4 | `04_train_persistence.ipynb` | `make train-persistence` | MLflow run, `models/` |
-| 4 | `04_train_ridge.ipynb` | `make train-ridge` | MLflow run, `models/` |
+| 4 | `04_train_persistence.ipynb` | `make train-persistence` | in-notebook test predictions and metrics |
+| 4 | `04_train_ridge.ipynb` | `make train-ridge` | in-notebook test predictions and metrics |
 | — | (both of the above) | `make train` | — |
 | 5 | `05_evaluate.ipynb` | `make evaluate` | comparison plots/tables |
 | 6 | `06_model_selection.ipynb` | `make model_selection` (runs 05 + 06) | selected model/run |
@@ -42,8 +42,9 @@ they're parallel model candidates, not sequential steps. `make evaluate` and
 full pipeline top to bottom with `make data features train evaluate
 model_selection` if you're starting from scratch.
 
-Training runs log params/metrics to a local MLflow file store (`./mlruns/`,
-inspect with `uv run mlflow ui`); trained model files are saved to `./models/`.
+The stage-4 MVP displays predictions and MAE/RMSE metrics in the notebooks. It
+does not perform model selection, MLflow logging, or write trained-model or
+prediction artifacts.
 
 ## Weather source
 
