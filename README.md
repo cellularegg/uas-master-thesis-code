@@ -33,12 +33,13 @@ training, while `make model_selection` re-runs evaluation first.
 | 4 | `04_train_persistence.ipynb` | `make train-persistence` | in-notebook test predictions and metrics |
 | 4 | `04_train_ridge.ipynb` | `make train-ridge` | in-notebook test predictions and metrics |
 | 4 | `04_train_mlp.ipynb` | `make train-mlp` | in-notebook test predictions and metrics |
-| — | (all three of the above) | `make train` | — |
+| 4 | `04_train_xgboost.ipynb` | `make train-xgboost` | in-notebook test predictions and metrics |
+| — | (all four of the above) | `make train` | — |
 | 5 | `05_evaluate.ipynb` | `make evaluate` | comparison plots/tables |
 | 6 | `06_model_selection.ipynb` | `make model_selection` (runs 05 + 06) | selected model/run |
 
-`04_train_persistence.ipynb`, `04_train_ridge.ipynb`, and
-`04_train_mlp.ipynb` share stage number 4: they're parallel model candidates,
+`04_train_persistence.ipynb`, `04_train_ridge.ipynb`, `04_train_mlp.ipynb`, and
+`04_train_xgboost.ipynb` share stage number 4: they're parallel model candidates,
 not sequential steps. `make evaluate` and `make model_selection` assume `make train`
 has already been run. If you're starting from scratch, run the full pipeline top
 to bottom with `make data features train evaluate model_selection`.

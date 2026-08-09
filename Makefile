@@ -83,9 +83,14 @@ train-ridge: features
 train-mlp: features
 	uv run jupyter execute --inplace 04_train_mlp.ipynb
 
+## Train the XGBoost regression model
+.PHONY: train-xgboost
+train-xgboost: features
+	uv run jupyter execute --inplace 04_train_xgboost.ipynb
+
 ## Train all models
 .PHONY: train
-train: train-persistence train-ridge train-mlp
+train: train-persistence train-ridge train-mlp train-xgboost
 
 ## Evaluate trained models (assumes `make train` has already been run)
 .PHONY: evaluate
