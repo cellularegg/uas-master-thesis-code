@@ -8,6 +8,7 @@ import math
 import os
 import platform
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import version
@@ -261,6 +262,41 @@ def build_feature_frame(
     return result
 
 
+def extract_station_frame(joined: pd.DataFrame, station_id: str) -> pd.DataFrame:
+    """Select one station's own columns from a joined frame, unprefixed, usable rows only.
+
+    Args:
+        joined: A wide frame produced by :func:`src.preprocess.join_station_frames`
+            (or its feature-engineered counterpart), prefixed as ``<station_id>__<column>``.
+        station_id: Station whose columns to select.
+
+    Returns:
+        A frame with ``timestamp`` plus every one of the station's own columns,
+        unprefixed, restricted to rows where the station has data.
+
+    Raises:
+        ValueError: If the station has no ``station_id`` column in ``joined``.
+    """
+    prefix = f"{station_id}__"
+    prefixed_columns = [
+        column for column in joined.columns if column.startswith(prefix)
+    ]
+    station_id_column = f"{prefix}station_id"
+    if station_id_column not in prefixed_columns:
+        raise ValueError(f"{station_id} is missing joined column: {station_id_column}")
+
+    available = joined[station_id_column].notna()
+    station = (
+        joined.loc[available, ["timestamp", *prefixed_columns]]
+        .rename(columns={column: column[len(prefix) :] for column in prefixed_columns})
+        .reset_index(drop=True)
+    )
+    if "imputed" in station.columns:
+        # Joined null regions make this column object-typed; usable rows are Boolean.
+        station["imputed"] = station["imputed"].astype(bool)
+    return station
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as file:
@@ -404,6 +440,117 @@ def write_feature_artifacts(
         "artifacts": {
             "train_features": _frame_profile(train_features, train_path),
             "test_features": _frame_profile(test_features, test_path),
+        },
+        "generator": {
+            "module": _relative_path(generator_path),
+            "sha256": _sha256(generator_path),
+        },
+        "runtime": {
+            "python": platform.python_version(),
+            "python_implementation": platform.python_implementation(),
+            "numpy": np.__version__,
+            "pandas": pd.__version__,
+            "pyarrow": version("pyarrow"),
+            "platform": sys.platform,
+        },
+    }
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return metadata
+
+
+def _validate_joined_output_against_source(
+    features: pd.DataFrame, source: pd.DataFrame, *, label: str
+) -> None:
+    if features.columns[: len(source.columns)].tolist() != source.columns.tolist():
+        raise ValueError(f"{label} features do not preserve source columns")
+    if not features["timestamp"].equals(source["timestamp"]):
+        raise ValueError(f"{label} features do not preserve source timestamps")
+
+
+def write_joined_feature_artifacts(
+    train_features: pd.DataFrame,
+    test_features: pd.DataFrame,
+    *,
+    station_ids: Sequence[str],
+    train_source_path: Path,
+    test_source_path: Path,
+    output_dir: Path,
+    config: FeatureConfig = DEFAULT_FEATURE_CONFIG,
+) -> dict[str, Any]:
+    """Replace the joined feature Parquets and write their lineage manifest.
+
+    Args:
+        train_features: Joined train partition engineered per-station.
+        test_features: Joined sealed-test partition engineered per-station.
+        station_ids: Every station represented in the joined frames.
+        train_source_path: Stage-02 joined train Parquet.
+        test_source_path: Stage-02 joined sealed-test Parquet.
+        output_dir: Destination directory for the feature artifacts.
+        config: Feature and target configuration.
+
+    Returns:
+        The manifest dictionary written to JSON.
+
+    Raises:
+        FileNotFoundError: If either source artifact does not exist.
+        ValueError: If feature rows do not preserve the joined source's columns
+            or timestamps.
+    """
+    for source_path in (train_source_path, test_source_path):
+        if not source_path.is_file():
+            raise FileNotFoundError(source_path)
+    train_source = pd.read_parquet(train_source_path)
+    test_source = pd.read_parquet(test_source_path)
+    _validate_joined_output_against_source(train_features, train_source, label="train")
+    _validate_joined_output_against_source(test_features, test_source, label="test")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    train_path = output_dir / "all_stations_train_features.parquet"
+    test_path = output_dir / "all_stations_test_features.parquet"
+    metadata_path = output_dir / "all_stations_feature_metadata.json"
+    train_features.to_parquet(train_path, index=False)
+    test_features.to_parquet(test_path, index=False)
+
+    predictor_columns = [
+        f"{station_id}__{column}"
+        for station_id in station_ids
+        for column in feature_column_names(config)
+    ]
+    target_columns = [
+        f"{station_id}__{column}"
+        for station_id in station_ids
+        for column in target_column_names(config)
+    ]
+
+    generator_path = Path(__file__)
+    metadata: dict[str, Any] = {
+        "schema_version": "1.0",
+        "generated_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "station_ids": list(station_ids),
+        "configuration": {
+            "horizon_hours": config.horizon_hours,
+            "calendar_timezone": config.calendar_timezone,
+            "lag_hours": list(config.lag_hours),
+            "rolling_windows": list(config.rolling_windows),
+        },
+        "predictor_columns": predictor_columns,
+        "target_columns": target_columns,
+        "semantics": {
+            "issue_time": "Predictors use information available through timestamp t.",
+            "rolling": "Trailing windows include t, require every source value, and never read future rows.",
+            "target": "water_level at t+1 through t+horizon_hours; the full vector is null unless target_valid is true.",
+            "physical_independence": "Train and sealed-test features are calculated separately; unavailable lookback rows remain null.",
+            "station_scope": "Each station's predictors and targets are calculated from its own timeline only; unavailable stations retain null derived columns.",
+        },
+        "inputs": {
+            "train": _frame_profile(train_source, train_source_path),
+            "test": _frame_profile(test_source, test_source_path),
+        },
+        "artifacts": {
+            "train": _frame_profile(train_features, train_path),
+            "test": _frame_profile(test_features, test_path),
         },
         "generator": {
             "module": _relative_path(generator_path),

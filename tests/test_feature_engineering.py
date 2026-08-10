@@ -15,10 +15,13 @@ from src.feature_engineering import (
     FeatureConfig,
     build_feature_frame,
     calculate_target_eligibility,
+    extract_station_frame,
     feature_column_names,
     target_column_names,
     write_feature_artifacts,
+    write_joined_feature_artifacts,
 )
+from src.preprocess import join_station_frames
 
 
 def _station_frame(
@@ -317,4 +320,125 @@ def test_writer_requires_both_source_artifacts(tmp_path: Path) -> None:
             test_source_path=tmp_path / "missing-test.parquet",
             output_dir=tmp_path,
             config=DEFAULT_FEATURE_CONFIG,
+        )
+
+
+def test_extract_station_frame_selects_unprefixed_usable_rows() -> None:
+    target = _station_frame(4, station_id="target-at")
+    upstream = _station_frame(2, station_id="upstream-at", start="2024-01-01T01:00")
+    joined = join_station_frames(
+        {"target-at": target, "upstream-at": upstream}, target_station_id="target-at"
+    )
+
+    result = extract_station_frame(joined, "upstream-at")
+
+    assert list(result.columns) == [
+        "timestamp",
+        "water_level",
+        "imputed",
+        "station_id",
+        "precipitation",
+        "temperature_2m",
+    ]
+    assert result["timestamp"].tolist() == upstream["timestamp"].tolist()
+    assert result["station_id"].tolist() == ["upstream-at", "upstream-at"]
+    assert result["water_level"].tolist() == [0.0, 1.0]
+    assert result["imputed"].dtype == bool
+
+
+def test_extract_station_frame_rejects_unknown_station() -> None:
+    target = _station_frame(3, station_id="target-at")
+    joined = join_station_frames({"target-at": target}, target_station_id="target-at")
+
+    with pytest.raises(ValueError, match="missing joined column"):
+        extract_station_frame(joined, "other-at")
+
+
+def test_write_joined_feature_artifacts_records_manifest_and_hashes(
+    tmp_path: Path,
+) -> None:
+    source = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=5, freq="h", tz="UTC"),
+            "target-at__water_level": range(5),
+            "target-at__station_id": "target-at",
+        }
+    )
+    train_source_path = tmp_path / "all_stations_train.parquet"
+    test_source_path = tmp_path / "all_stations_test.parquet"
+    source.to_parquet(train_source_path, index=False)
+    source.to_parquet(test_source_path, index=False)
+    features = source.copy()
+    features["target-at__water_level_lag_1h"] = features[
+        "target-at__water_level"
+    ].shift(1)
+
+    metadata = write_joined_feature_artifacts(
+        features,
+        features,
+        station_ids=["target-at"],
+        train_source_path=train_source_path,
+        test_source_path=test_source_path,
+        output_dir=tmp_path / "output",
+    )
+
+    train_path = tmp_path / "output" / "all_stations_train_features.parquet"
+    test_path = tmp_path / "output" / "all_stations_test_features.parquet"
+    metadata_path = tmp_path / "output" / "all_stations_feature_metadata.json"
+    assert json.loads(metadata_path.read_text()) == metadata
+    assert metadata["station_ids"] == ["target-at"]
+    assert metadata["predictor_columns"][:2] == [
+        "target-at__water_level",
+        "target-at__imputed",
+    ]
+    assert metadata["target_columns"][0] == "target-at__target_t_plus_01"
+    assert metadata["artifacts"]["train"]["sha256"] == _sha256(train_path)
+    assert metadata["artifacts"]["test"]["sha256"] == _sha256(test_path)
+    assert metadata["generator"]["sha256"] == _sha256(
+        Path("src/feature_engineering.py")
+    )
+    assert not Path(metadata["inputs"]["train"]["path"]).is_absolute()
+
+
+def test_write_joined_feature_artifacts_rejects_missing_source_files(
+    tmp_path: Path,
+) -> None:
+    frame = pd.DataFrame(
+        {"timestamp": pd.date_range("2024-01-01", periods=2, freq="h", tz="UTC")}
+    )
+
+    with pytest.raises(FileNotFoundError):
+        write_joined_feature_artifacts(
+            frame,
+            frame,
+            station_ids=["target-at"],
+            train_source_path=tmp_path / "missing-train.parquet",
+            test_source_path=tmp_path / "missing-test.parquet",
+            output_dir=tmp_path,
+        )
+
+
+def test_write_joined_feature_artifacts_rejects_changed_source_columns(
+    tmp_path: Path,
+) -> None:
+    source = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=3, freq="h", tz="UTC"),
+            "target-at__water_level": range(3),
+        }
+    )
+    train_source_path = tmp_path / "train.parquet"
+    test_source_path = tmp_path / "test.parquet"
+    source.to_parquet(train_source_path, index=False)
+    source.to_parquet(test_source_path, index=False)
+    features = source.rename(columns={"target-at__water_level": "target-at__level"})
+
+    with pytest.raises(ValueError, match="do not preserve source columns"):
+        write_joined_feature_artifacts(
+            features,
+            features,
+            station_ids=["target-at"],
+            train_source_path=train_source_path,
+            test_source_path=test_source_path,
+            output_dir=tmp_path / "output",
         )

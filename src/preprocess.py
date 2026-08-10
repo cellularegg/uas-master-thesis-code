@@ -274,6 +274,111 @@ def _frame_profile(frame: pd.DataFrame, path: Path) -> dict[str, Any]:
     }
 
 
+def _validate_joined_frame(
+    combined: pd.DataFrame, *, station_ids: Sequence[str]
+) -> None:
+    """Validate the target's contiguous hourly timeline and station coverage."""
+    if "timestamp" not in combined.columns:
+        raise ValueError("missing required column: timestamp")
+    if combined.empty:
+        raise ValueError("joined timeline is empty")
+
+    timestamp_dtype = combined["timestamp"].dtype
+    if (
+        not isinstance(timestamp_dtype, pd.DatetimeTZDtype)
+        or str(timestamp_dtype.tz) != "UTC"
+    ):
+        raise ValueError("timestamp must be timezone-aware UTC")
+    if combined["timestamp"].duplicated().any():
+        raise ValueError("timestamps must be unique")
+    expected_grid = pd.date_range(
+        combined["timestamp"].iloc[0], periods=len(combined), freq="h"
+    )
+    if not pd.DatetimeIndex(combined["timestamp"]).equals(expected_grid):
+        raise ValueError("timestamps must form a contiguous hourly grid")
+
+    missing_station_columns = sorted(
+        station_id
+        for station_id in station_ids
+        if f"{station_id}__station_id" not in combined.columns
+    )
+    if missing_station_columns:
+        raise ValueError(
+            f"joined frame is missing station_id columns for: {missing_station_columns}"
+        )
+
+
+def write_joined_preprocess_artifacts(
+    joined_train: pd.DataFrame,
+    joined_test: pd.DataFrame,
+    *,
+    station_ids: Sequence[str],
+    target_station_id: str,
+    output_dir: Path,
+    test_fraction: float = TEST_FRACTION,
+) -> dict[str, Any]:
+    """Write the joined chronological artifacts and their lineage manifest.
+
+    Args:
+        joined_train: Chronological leading partition from :func:`join_station_frames`.
+        joined_test: Sealed trailing partition from :func:`join_station_frames`.
+        station_ids: Every station represented in the joined frames.
+        target_station_id: Station whose timeline defines the joined timestamps.
+        output_dir: Destination directory for the three artifacts.
+        test_fraction: Fraction used to create the supplied partitions.
+
+    Returns:
+        The metadata dictionary written to JSON.
+
+    Raises:
+        ValueError: If the target's timeline is not contiguous hourly UTC, a
+            station is missing its prefixed ``station_id`` column, or
+            ``target_station_id`` is not in ``station_ids``.
+    """
+    if target_station_id not in station_ids:
+        raise ValueError(
+            f"target station {target_station_id!r} is missing from station_ids"
+        )
+    combined = pd.concat([joined_train, joined_test], ignore_index=True)
+    _validate_joined_frame(combined, station_ids=station_ids)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    train_path = output_dir / "all_stations_train.parquet"
+    test_path = output_dir / "all_stations_test.parquet"
+    metadata_path = output_dir / "all_stations_preprocess_metadata.json"
+    joined_train.to_parquet(train_path, index=False)
+    joined_test.to_parquet(test_path, index=False)
+
+    generator_path = Path(__file__)
+    metadata: dict[str, Any] = {
+        "schema_version": "1.0",
+        "generated_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "station_ids": list(station_ids),
+        "target_station_id": target_station_id,
+        "configuration": {
+            "test_fraction": test_fraction,
+            "split_rule": "first floor((1-test_fraction)*N) rows are train; the remainder is sealed test data",
+        },
+        "rows": {
+            "total": len(combined),
+            "train": len(joined_train),
+            "test": len(joined_test),
+        },
+        "artifacts": {
+            "train": _frame_profile(joined_train, train_path),
+            "test": _frame_profile(joined_test, test_path),
+        },
+        "generator": {
+            "module": _relative_path(generator_path),
+            "sha256": _sha256(generator_path),
+        },
+    }
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return metadata
+
+
 def write_preprocess_artifacts(
     train: pd.DataFrame,
     test: pd.DataFrame,

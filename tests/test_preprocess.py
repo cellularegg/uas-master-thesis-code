@@ -14,6 +14,7 @@ from src.preprocess import (
     join_station_frames,
     merge_weather,
     split_train_test,
+    write_joined_preprocess_artifacts,
     write_preprocess_artifacts,
 )
 
@@ -292,4 +293,85 @@ def test_writer_rejects_partitions_that_do_not_match_the_contract(
             station_id="station-at",
             output_dir=tmp_path,
             test_fraction=0.20,
+        )
+
+
+def _joined_partitions(
+    *, rows: int = 500, test_fraction: float = 0.20, upstream_start: str | None = None
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    target_train, target_test = split_train_test(
+        _station_frame(rows, station_id="target-at"), test_fraction
+    )
+    upstream = _station_frame(rows, station_id="upstream-at")
+    if upstream_start is not None:
+        upstream["timestamp"] = pd.date_range(
+            upstream_start, periods=rows, freq="h", tz="UTC"
+        )
+    upstream_train, upstream_test = split_train_test(upstream, test_fraction)
+    joined_train = join_station_frames(
+        {"target-at": target_train, "upstream-at": upstream_train},
+        target_station_id="target-at",
+    )
+    joined_test = join_station_frames(
+        {"target-at": target_test, "upstream-at": upstream_test},
+        target_station_id="target-at",
+    )
+    return joined_train, joined_test
+
+
+def test_write_joined_artifacts_records_hashes_schemas_and_rows(
+    tmp_path: Path,
+) -> None:
+    joined_train, joined_test = _joined_partitions()
+    output_dir = tmp_path / "joined"
+
+    metadata = write_joined_preprocess_artifacts(
+        joined_train,
+        joined_test,
+        station_ids=["target-at", "upstream-at"],
+        target_station_id="target-at",
+        output_dir=output_dir,
+        test_fraction=0.20,
+    )
+
+    train_path = output_dir / "all_stations_train.parquet"
+    test_path = output_dir / "all_stations_test.parquet"
+    metadata_path = output_dir / "all_stations_preprocess_metadata.json"
+    assert json.loads(metadata_path.read_text()) == metadata
+    assert metadata["station_ids"] == ["target-at", "upstream-at"]
+    assert metadata["target_station_id"] == "target-at"
+    assert metadata["rows"] == {"total": 500, "train": 400, "test": 100}
+    assert metadata["artifacts"]["train"]["sha256"] == _sha256(train_path)
+    assert metadata["artifacts"]["test"]["sha256"] == _sha256(test_path)
+    assert metadata["generator"]["sha256"] == _sha256(Path("src/preprocess.py"))
+    assert not Path(metadata["artifacts"]["train"]["path"]).is_absolute()
+
+
+def test_write_joined_artifacts_rejects_target_missing_from_station_ids(
+    tmp_path: Path,
+) -> None:
+    joined_train, joined_test = _joined_partitions()
+
+    with pytest.raises(ValueError, match="target station"):
+        write_joined_preprocess_artifacts(
+            joined_train,
+            joined_test,
+            station_ids=["upstream-at"],
+            target_station_id="target-at",
+            output_dir=tmp_path,
+        )
+
+
+def test_write_joined_artifacts_rejects_station_missing_from_joined_frame(
+    tmp_path: Path,
+) -> None:
+    joined_train, joined_test = _joined_partitions()
+
+    with pytest.raises(ValueError, match="missing station_id columns"):
+        write_joined_preprocess_artifacts(
+            joined_train,
+            joined_test,
+            station_ids=["target-at", "upstream-at", "other-at"],
+            target_station_id="target-at",
+            output_dir=tmp_path,
         )
