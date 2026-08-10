@@ -166,6 +166,25 @@ def test_fetch_inca_deduplicates_inclusive_response_timestamps() -> None:
     assert result["precipitation"].tolist() == [0.0, 1.8, 9.0]
 
 
+def test_fetch_inca_preserves_missing_weather_values() -> None:
+    csv = """time,RR [kg m-2],T2M [degree_Celsius],lat,lon
+2024-01-01T00:00+00:00,,1.4,47.10029,14.20232
+2024-01-01T01:00+00:00,1.8,,47.10029,14.20232
+"""
+
+    result = fetch_inca(
+        "station-at",
+        47.0,
+        14.0,
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 1, tzinfo=UTC),
+        client=FakeGeoSphereClient([FakeResponse(csv)]),
+    )
+
+    assert result["precipitation"].isna().tolist() == [True, False]
+    assert result["temperature_2m"].isna().tolist() == [False, True]
+
+
 @pytest.mark.parametrize(
     ("response", "message"),
     [

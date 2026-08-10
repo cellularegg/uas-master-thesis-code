@@ -9,7 +9,18 @@ load_dotenv()
 PEGELALARM_USERNAME = os.getenv("PEGELALARM_USERNAME")
 PEGELALARM_PASSWORD = os.getenv("PEGELALARM_PASSWORD")
 
-STATION_IDS = ["207241-at"]
+STATION_IDS = [
+    "207241-at",
+    "207019-at",
+    "207027-at",
+    "207340-at",
+    "207068-at",
+    "Ennshafen1.Rivermeter-at",
+    "207084-at",
+    "207100-at",
+    "207357-at",
+    "DUER-at",
+]
 TARGET_STATION_ID = "207241-at"
 COUNTRY_CODE = "AT"
 UNIT = "height"

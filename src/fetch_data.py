@@ -143,6 +143,8 @@ def fetch_inca(
 
     The GeoSphere API uses inclusive request bounds; duplicate timestamps are
     therefore removed after parsing before the requested UTC interval is applied.
+    Missing weather values are preserved as ``NaN``; non-empty non-numeric
+    weather values are rejected.
     """
     start_timestamp = _utc_timestamp(start, name="start")
     end_timestamp = _utc_timestamp(end, name="end")
@@ -183,10 +185,18 @@ def fetch_inca(
     weather["time"] = pd.to_datetime(weather["time"], utc=True, errors="coerce")
     if weather["time"].isna().any():
         raise RuntimeError("GeoSphere INCA response contains invalid timestamps")
-    for native_column in (*INCA_NATIVE_COLUMNS, "lat", "lon"):
-        weather[native_column] = pd.to_numeric(weather[native_column], errors="coerce")
-    if weather[list(INCA_NATIVE_COLUMNS)].isna().any().any():
+    invalid_weather = pd.Series(False, index=weather.index)
+    for native_column in INCA_NATIVE_COLUMNS:
+        raw_values = weather[native_column]
+        numeric_values = pd.to_numeric(raw_values, errors="coerce")
+        invalid_weather |= raw_values.notna() & numeric_values.isna()
+        weather[native_column] = numeric_values
+    if invalid_weather.any():
         raise RuntimeError("GeoSphere INCA response contains invalid weather values")
+    for coordinate_column in ("lat", "lon"):
+        weather[coordinate_column] = pd.to_numeric(
+            weather[coordinate_column], errors="coerce"
+        )
     if weather[["lat", "lon"]].isna().any().any():
         raise RuntimeError("GeoSphere INCA response contains invalid grid coordinates")
     grid_coordinates = weather[["lat", "lon"]].drop_duplicates()

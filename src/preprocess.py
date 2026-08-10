@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -169,6 +169,80 @@ def split_train_test(
     train = ordered.iloc[:train_size].reset_index(drop=True)
     test = ordered.iloc[train_size:].reset_index(drop=True)
     return train, test
+
+
+def join_station_frames(
+    station_frames: Mapping[str, pd.DataFrame], *, target_station_id: str
+) -> pd.DataFrame:
+    """Join station frames onto the target station's timestamp timeline.
+
+    Every non-timestamp column is prefixed with its station identifier so that
+    complete preprocessed frames can be represented in one wide DataFrame.
+    The target station supplies the output timestamps; timestamps unavailable
+    for an upstream station therefore remain present with missing upstream
+    values.
+
+    Args:
+        station_frames: Mapping from station identifier to one preprocessed
+            station frame.
+        target_station_id: Station whose timestamps define the output rows.
+
+    Returns:
+        A wide DataFrame with one unprefixed ``timestamp`` column and all
+        station columns prefixed as ``<station_id>__<column>``.
+
+    Raises:
+        ValueError: If the mapping is empty, the target is missing, a frame's
+            station identifier does not match its mapping key, or a frame is
+            not a valid hourly station timeline.
+    """
+    if not station_frames:
+        raise ValueError("station_frames must contain at least one station")
+    if target_station_id not in station_frames:
+        raise ValueError(
+            f"target station {target_station_id!r} is missing from station_frames"
+        )
+
+    prepared: dict[str, pd.DataFrame] = {}
+    for station_id, frame in station_frames.items():
+        if not frame.columns.is_unique:
+            raise ValueError(f"frame for {station_id!r} has duplicate columns")
+
+        ordered = _validate_hourly_station_frame(frame)
+        frame_station_ids = ordered["station_id"].drop_duplicates().tolist()
+        if frame_station_ids != [station_id]:
+            raise ValueError(
+                f"frame station identifier does not match mapping key {station_id!r}: "
+                f"{frame_station_ids!r}"
+            )
+
+        renamed = ordered.rename(
+            columns={
+                column: f"{station_id}__{column}"
+                for column in ordered.columns
+                if column != "timestamp"
+            }
+        )
+        prepared[station_id] = renamed
+
+    station_order = [
+        target_station_id,
+        *(
+            station_id
+            for station_id in station_frames
+            if station_id != target_station_id
+        ),
+    ]
+    joined = prepared[target_station_id]
+    for station_id in station_order[1:]:
+        joined = joined.merge(
+            prepared[station_id],
+            on="timestamp",
+            how="left",
+            sort=False,
+            validate="one_to_one",
+        )
+    return joined
 
 
 def _sha256(path: Path) -> str:

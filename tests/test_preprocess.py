@@ -11,6 +11,7 @@ import pytest
 
 from src.preprocess import (
     clean_water_level,
+    join_station_frames,
     merge_weather,
     split_train_test,
     write_preprocess_artifacts,
@@ -125,6 +126,50 @@ def test_split_reconstructs_source_with_exact_chronological_partition() -> None:
         pd.concat([train, test], ignore_index=True),
         source.sort_values("timestamp").reset_index(drop=True),
     )
+
+
+def test_join_station_frames_uses_target_timeline_and_prefixes_columns() -> None:
+    target = _station_frame(4, station_id="target-at")
+    upstream = _station_frame(2, station_id="upstream-at")
+    upstream["timestamp"] = pd.date_range(
+        "2024-01-01T01:00", periods=2, freq="h", tz="UTC"
+    )
+
+    result = join_station_frames(
+        {"target-at": target, "upstream-at": upstream},
+        target_station_id="target-at",
+    )
+
+    assert result["timestamp"].tolist() == target["timestamp"].tolist()
+    assert list(result.columns) == [
+        "timestamp",
+        "target-at__water_level",
+        "target-at__imputed",
+        "target-at__station_id",
+        "upstream-at__water_level",
+        "upstream-at__imputed",
+        "upstream-at__station_id",
+    ]
+    assert result["target-at__water_level"].tolist() == [0, 1, 2, 3]
+    assert np.allclose(
+        result["upstream-at__water_level"], [np.nan, 0, 1, np.nan], equal_nan=True
+    )
+    assert pd.isna(result["upstream-at__station_id"].iloc[0])
+    assert result["upstream-at__station_id"].iloc[1:3].tolist() == [
+        "upstream-at",
+        "upstream-at",
+    ]
+    assert pd.isna(result["upstream-at__station_id"].iloc[3])
+
+
+def test_join_station_frames_rejects_missing_target_and_mismatched_station() -> None:
+    upstream = _station_frame(3, station_id="upstream-at")
+
+    with pytest.raises(ValueError, match="target station"):
+        join_station_frames({"upstream-at": upstream}, target_station_id="target-at")
+
+    with pytest.raises(ValueError, match="does not match mapping key"):
+        join_station_frames({"target-at": upstream}, target_station_id="target-at")
 
 
 @pytest.mark.parametrize(
