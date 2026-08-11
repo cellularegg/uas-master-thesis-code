@@ -11,6 +11,7 @@ import pytest
 
 from src.preprocess import (
     clean_water_level,
+    filter_station_frames_by_target_range_overlap,
     join_station_frames,
     merge_weather,
     split_train_test,
@@ -171,6 +172,105 @@ def test_join_station_frames_rejects_missing_target_and_mismatched_station() -> 
 
     with pytest.raises(ValueError, match="does not match mapping key"):
         join_station_frames({"target-at": upstream}, target_station_id="target-at")
+
+
+def test_filter_station_frames_retains_exact_threshold_and_target() -> None:
+    target = _station_frame(10, station_id="target-at")
+    exact = _station_frame(8, station_id="exact-at")
+    exact["timestamp"] = pd.date_range(
+        "2024-01-01T02:00", periods=8, freq="h", tz="UTC"
+    )
+    below = _station_frame(7, station_id="below-at")
+    below["timestamp"] = pd.date_range(
+        "2024-01-01T03:00", periods=7, freq="h", tz="UTC"
+    )
+    no_overlap = _station_frame(4, station_id="none-at")
+    no_overlap["timestamp"] = pd.date_range("2024-01-02", periods=4, freq="h", tz="UTC")
+
+    retained, report = filter_station_frames_by_target_range_overlap(
+        {
+            "target-at": target,
+            "exact-at": exact,
+            "below-at": below,
+            "none-at": no_overlap,
+        },
+        target_station_id="target-at",
+        min_overlap_fraction=0.80,
+    )
+
+    assert list(retained) == ["target-at", "exact-at"]
+    report_by_station = {record["station_id"]: record for record in report}
+    assert report_by_station["target-at"]["overlap_hours"] == 10
+    assert report_by_station["exact-at"]["overlap_hours"] == 8
+    assert report_by_station["exact-at"]["overlap_fraction"] == pytest.approx(0.80)
+    assert report_by_station["exact-at"]["retained"] is True
+    assert report_by_station["below-at"]["retained"] is False
+    assert report_by_station["none-at"]["overlap_hours"] == 0
+    assert report_by_station["none-at"]["retained"] is False
+
+
+@pytest.mark.parametrize("threshold", [True, np.nan, -0.1, 1.1, "0.9"])
+def test_filter_station_frames_rejects_invalid_thresholds(threshold: object) -> None:
+    with pytest.raises((TypeError, ValueError), match="min_overlap_fraction"):
+        filter_station_frames_by_target_range_overlap(
+            {"target-at": _station_frame(10)},
+            target_station_id="target-at",
+            min_overlap_fraction=threshold,  # type: ignore[arg-type]
+        )
+
+
+def test_filter_station_frames_rejects_missing_and_mismatched_frames() -> None:
+    with pytest.raises(ValueError, match="target station"):
+        filter_station_frames_by_target_range_overlap(
+            {"other-at": _station_frame(10, station_id="other-at")},
+            target_station_id="target-at",
+        )
+
+    with pytest.raises(ValueError, match="does not match mapping key"):
+        filter_station_frames_by_target_range_overlap(
+            {"target-at": _station_frame(10, station_id="other-at")},
+            target_station_id="target-at",
+        )
+
+
+def test_joined_artifacts_can_persist_coverage_metadata(
+    tmp_path: Path,
+) -> None:
+    target = _station_frame(20, station_id="target-at")
+    upstream = _station_frame(20, station_id="upstream-at")
+    retained, coverage_report = filter_station_frames_by_target_range_overlap(
+        {"target-at": target, "upstream-at": upstream},
+        target_station_id="target-at",
+    )
+    target_train, target_test = split_train_test(retained["target-at"], 0.20)
+    upstream_train, upstream_test = split_train_test(retained["upstream-at"], 0.20)
+    joined_train = join_station_frames(
+        {"target-at": target_train, "upstream-at": upstream_train},
+        target_station_id="target-at",
+    )
+    joined_test = join_station_frames(
+        {"target-at": target_test, "upstream-at": upstream_test},
+        target_station_id="target-at",
+    )
+
+    metadata = write_joined_preprocess_artifacts(
+        joined_train,
+        joined_test,
+        station_ids=list(retained),
+        target_station_id="target-at",
+        output_dir=tmp_path,
+        test_fraction=0.20,
+        coverage_report=coverage_report,
+    )
+
+    assert metadata["schema_version"] == "1.1"
+    assert metadata["coverage"] == coverage_report
+    assert (
+        json.loads((tmp_path / "all_stations_preprocess_metadata.json").read_text())[
+            "coverage"
+        ]
+        == coverage_report
+    )
 
 
 @pytest.mark.parametrize(

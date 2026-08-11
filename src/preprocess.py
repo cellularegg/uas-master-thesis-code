@@ -8,12 +8,13 @@ import math
 import os
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from src.config import TEST_FRACTION
+from src.config import MIN_TARGET_RANGE_OVERLAP, TEST_FRACTION
 
 
 def clean_water_level(raw: pd.DataFrame, *, max_gap_hours: int) -> pd.DataFrame:
@@ -136,6 +137,106 @@ def _validate_hourly_station_frame(frame: pd.DataFrame) -> pd.DataFrame:
             f"frame must contain exactly one non-null station; got {station_ids!r}"
         )
     return ordered
+
+
+def filter_station_frames_by_target_range_overlap(
+    station_frames: Mapping[str, pd.DataFrame],
+    *,
+    target_station_id: str,
+    min_overlap_fraction: float = MIN_TARGET_RANGE_OVERLAP,
+) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]]]:
+    """Retain station timelines that overlap the target range sufficiently.
+
+    The overlap is measured from inclusive hourly timestamp spans, using the
+    complete target timeline as the denominator.  A station with timestamps
+    from ``target_start`` through ``target_end`` therefore has
+    ``target_hours`` possible overlapping hours.  The target station is always
+    retained after its own timeline has been validated.
+
+    Args:
+        station_frames: Complete, pre-split station frames keyed by station ID.
+        target_station_id: Station whose complete timeline defines the target
+            range and denominator.
+        min_overlap_fraction: Minimum positive fraction of the target range a
+            non-target station must overlap. The exact threshold is retained.
+
+    Returns:
+        A mapping containing the validated, sorted frames that pass the filter,
+        followed by JSON-serializable per-station coverage records.
+
+    Raises:
+        TypeError: If ``min_overlap_fraction`` is not a real number.
+        ValueError: If the threshold or any station timeline is invalid, the
+            target is missing, or a frame's station ID does not match its key.
+    """
+    if isinstance(min_overlap_fraction, bool) or not isinstance(
+        min_overlap_fraction, Real
+    ):
+        raise TypeError("min_overlap_fraction must be a finite number between 0 and 1")
+    threshold = float(min_overlap_fraction)
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("min_overlap_fraction must be between 0 and 1")
+    if not station_frames:
+        raise ValueError("station_frames must contain at least one station")
+    if target_station_id not in station_frames:
+        raise ValueError(
+            f"target station {target_station_id!r} is missing from station_frames"
+        )
+
+    validated: dict[str, pd.DataFrame] = {}
+    for station_id, frame in station_frames.items():
+        if not isinstance(frame, pd.DataFrame):
+            raise TypeError(f"frame for {station_id!r} must be a pandas DataFrame")
+        if not frame.columns.is_unique:
+            raise ValueError(f"frame for {station_id!r} has duplicate columns")
+        ordered = _validate_hourly_station_frame(frame)
+        frame_station_ids = ordered["station_id"].drop_duplicates().tolist()
+        if frame_station_ids != [station_id]:
+            raise ValueError(
+                f"frame station identifier does not match mapping key {station_id!r}: "
+                f"{frame_station_ids!r}"
+            )
+        validated[station_id] = ordered
+
+    target = validated[target_station_id]
+    target_start = target["timestamp"].iloc[0]
+    target_end = target["timestamp"].iloc[-1]
+    target_hours = len(target)
+    coverage_report: list[dict[str, Any]] = []
+    retained: dict[str, pd.DataFrame] = {}
+
+    for station_id, frame in validated.items():
+        station_start = frame["timestamp"].iloc[0]
+        station_end = frame["timestamp"].iloc[-1]
+        overlap_start = max(station_start, target_start)
+        overlap_end = min(station_end, target_end)
+        if overlap_start <= overlap_end:
+            overlap_hours = (
+                int((overlap_end - overlap_start).total_seconds() // (60 * 60)) + 1
+            )
+        else:
+            overlap_hours = 0
+        overlap_fraction = overlap_hours / target_hours
+        is_target = station_id == target_station_id
+        is_retained = is_target or (overlap_hours > 0 and overlap_fraction >= threshold)
+        record: dict[str, Any] = {
+            "station_id": station_id,
+            "station_start_utc": _utc_text(station_start),
+            "station_end_utc": _utc_text(station_end),
+            "target_start_utc": _utc_text(target_start),
+            "target_end_utc": _utc_text(target_end),
+            "overlap_start_utc": (_utc_text(overlap_start) if overlap_hours else None),
+            "overlap_end_utc": _utc_text(overlap_end) if overlap_hours else None,
+            "target_hours": target_hours,
+            "overlap_hours": overlap_hours,
+            "overlap_fraction": overlap_fraction,
+            "retained": is_retained,
+        }
+        coverage_report.append(record)
+        if is_retained:
+            retained[station_id] = frame
+
+    return retained, coverage_report
 
 
 def split_train_test(
@@ -316,6 +417,7 @@ def write_joined_preprocess_artifacts(
     target_station_id: str,
     output_dir: Path,
     test_fraction: float = TEST_FRACTION,
+    coverage_report: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Write the joined chronological artifacts and their lineage manifest.
 
@@ -326,6 +428,8 @@ def write_joined_preprocess_artifacts(
         target_station_id: Station whose timeline defines the joined timestamps.
         output_dir: Destination directory for the three artifacts.
         test_fraction: Fraction used to create the supplied partitions.
+        coverage_report: Optional per-station target-range overlap records from
+            :func:`filter_station_frames_by_target_range_overlap`.
 
     Returns:
         The metadata dictionary written to JSON.
@@ -351,12 +455,13 @@ def write_joined_preprocess_artifacts(
 
     generator_path = Path(__file__)
     metadata: dict[str, Any] = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "generated_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "station_ids": list(station_ids),
         "target_station_id": target_station_id,
         "configuration": {
             "test_fraction": test_fraction,
+            "min_target_range_overlap": MIN_TARGET_RANGE_OVERLAP,
             "split_rule": "first floor((1-test_fraction)*N) rows are train; the remainder is sealed test data",
         },
         "rows": {
@@ -373,6 +478,8 @@ def write_joined_preprocess_artifacts(
             "sha256": _sha256(generator_path),
         },
     }
+    if coverage_report is not None:
+        metadata["coverage"] = [dict(record) for record in coverage_report]
     metadata_path.write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
