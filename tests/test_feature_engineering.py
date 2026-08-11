@@ -377,6 +377,7 @@ def test_write_joined_feature_artifacts_records_manifest_and_hashes(
         features,
         features,
         station_ids=["target-at"],
+        engineered_station_ids=["target-at"],
         train_source_path=train_source_path,
         test_source_path=test_source_path,
         output_dir=tmp_path / "output",
@@ -387,6 +388,7 @@ def test_write_joined_feature_artifacts_records_manifest_and_hashes(
     metadata_path = tmp_path / "output" / "all_stations_feature_metadata.json"
     assert json.loads(metadata_path.read_text()) == metadata
     assert metadata["station_ids"] == ["target-at"]
+    assert metadata["engineered_station_ids"] == ["target-at"]
     assert metadata["predictor_columns"][:2] == [
         "target-at__water_level",
         "target-at__imputed",
@@ -398,6 +400,60 @@ def test_write_joined_feature_artifacts_records_manifest_and_hashes(
         Path("src/feature_engineering.py")
     )
     assert not Path(metadata["inputs"]["train"]["path"]).is_absolute()
+
+
+def test_target_only_joined_schema_preserves_upstream_raw_columns(
+    tmp_path: Path,
+) -> None:
+    target_id = "target-at"
+    upstream_id = "upstream-at"
+    target = _station_frame(220, station_id=target_id)
+    upstream = _station_frame(220, station_id=upstream_id, water_offset=1000.0)
+    source = join_station_frames(
+        {target_id: target, upstream_id: upstream}, target_station_id=target_id
+    )
+    target_source = extract_station_frame(source, target_id)
+    target_features = build_feature_frame(target_source, station_id=target_id)
+    features = source.copy()
+    for column in target_features.columns:
+        if column not in target_source.columns:
+            features[f"{target_id}__{column}"] = target_features[column].to_numpy()
+
+    train_source_path = tmp_path / "train.parquet"
+    test_source_path = tmp_path / "test.parquet"
+    source.to_parquet(train_source_path, index=False)
+    source.to_parquet(test_source_path, index=False)
+
+    metadata = write_joined_feature_artifacts(
+        features,
+        features,
+        station_ids=[target_id, upstream_id],
+        engineered_station_ids=[target_id],
+        train_source_path=train_source_path,
+        test_source_path=test_source_path,
+        output_dir=tmp_path / "output",
+    )
+
+    raw_predictors = ["water_level", "imputed", *WEATHER_VARIABLES]
+    expected_predictors = [
+        f"{target_id}__{column}" for column in feature_column_names()
+    ] + [f"{upstream_id}__{column}" for column in raw_predictors]
+    expected_targets = [f"{target_id}__{column}" for column in target_column_names()]
+    assert metadata["station_ids"] == [target_id, upstream_id]
+    assert metadata["engineered_station_ids"] == [target_id]
+    assert metadata["predictor_columns"] == expected_predictors
+    assert metadata["target_columns"] == expected_targets
+    assert f"{upstream_id}__station_id" not in metadata["predictor_columns"]
+    assert list(features.columns[: len(source.columns)]) == list(source.columns)
+    for column in source.columns:
+        assert features[column].equals(source[column])
+
+    upstream_derived = {
+        f"{upstream_id}__{column}"
+        for column in set(feature_column_names()).difference(raw_predictors)
+        | {"target_valid", *target_column_names()}
+    }
+    assert not upstream_derived.intersection(features.columns)
 
 
 def test_write_joined_feature_artifacts_rejects_missing_source_files(
@@ -412,6 +468,7 @@ def test_write_joined_feature_artifacts_rejects_missing_source_files(
             frame,
             frame,
             station_ids=["target-at"],
+            engineered_station_ids=["target-at"],
             train_source_path=tmp_path / "missing-train.parquet",
             test_source_path=tmp_path / "missing-test.parquet",
             output_dir=tmp_path,
@@ -438,6 +495,7 @@ def test_write_joined_feature_artifacts_rejects_changed_source_columns(
             features,
             features,
             station_ids=["target-at"],
+            engineered_station_ids=["target-at"],
             train_source_path=train_source_path,
             test_source_path=test_source_path,
             output_dir=tmp_path / "output",

@@ -463,10 +463,30 @@ def write_feature_artifacts(
 def _validate_joined_output_against_source(
     features: pd.DataFrame, source: pd.DataFrame, *, label: str
 ) -> None:
+    if len(features) != len(source):
+        raise ValueError(f"{label} features do not preserve source rows")
     if features.columns[: len(source.columns)].tolist() != source.columns.tolist():
         raise ValueError(f"{label} features do not preserve source columns")
-    if not features["timestamp"].equals(source["timestamp"]):
-        raise ValueError(f"{label} features do not preserve source timestamps")
+    for column in source.columns:
+        if not features[column].equals(source[column]):
+            raise ValueError(f"{label} features changed original column {column!r}")
+
+
+def _joined_predictor_columns(
+    station_ids: Sequence[str],
+    engineered_station_ids: Sequence[str],
+    config: FeatureConfig,
+) -> list[str]:
+    """Return ordered joined predictors for the requested station scope."""
+    raw_predictors = ("water_level", "imputed", *WEATHER_VARIABLES)
+    engineered = set(engineered_station_ids)
+    return [
+        f"{station_id}__{column}"
+        for station_id in station_ids
+        for column in (
+            feature_column_names(config) if station_id in engineered else raw_predictors
+        )
+    ]
 
 
 def write_joined_feature_artifacts(
@@ -474,6 +494,7 @@ def write_joined_feature_artifacts(
     test_features: pd.DataFrame,
     *,
     station_ids: Sequence[str],
+    engineered_station_ids: Sequence[str],
     train_source_path: Path,
     test_source_path: Path,
     output_dir: Path,
@@ -485,6 +506,8 @@ def write_joined_feature_artifacts(
         train_features: Joined train partition engineered per-station.
         test_features: Joined sealed-test partition engineered per-station.
         station_ids: Every station represented in the joined frames.
+        engineered_station_ids: Stations receiving the full feature and target
+            contract. Other stations remain raw joined inputs.
         train_source_path: Stage-02 joined train Parquet.
         test_source_path: Stage-02 joined sealed-test Parquet.
         output_dir: Destination directory for the feature artifacts.
@@ -496,8 +519,20 @@ def write_joined_feature_artifacts(
     Raises:
         FileNotFoundError: If either source artifact does not exist.
         ValueError: If feature rows do not preserve the joined source's columns
-            or timestamps.
+            or values, or if the engineered station scope is invalid.
     """
+    station_ids = list(station_ids)
+    engineered_station_ids = list(engineered_station_ids)
+    if len(station_ids) != len(set(station_ids)):
+        raise ValueError("station_ids must be unique")
+    if len(engineered_station_ids) != len(set(engineered_station_ids)):
+        raise ValueError("engineered_station_ids must be unique")
+    missing_engineered = sorted(set(engineered_station_ids).difference(station_ids))
+    if missing_engineered:
+        raise ValueError(
+            "engineered_station_ids must be included in station_ids: "
+            f"{missing_engineered}"
+        )
     for source_path in (train_source_path, test_source_path):
         if not source_path.is_file():
             raise FileNotFoundError(source_path)
@@ -506,6 +541,34 @@ def write_joined_feature_artifacts(
     _validate_joined_output_against_source(train_features, train_source, label="train")
     _validate_joined_output_against_source(test_features, test_source, label="test")
 
+    raw_predictors = {"water_level", "imputed", *WEATHER_VARIABLES}
+    derived_columns = {
+        *set(feature_column_names(config)).difference(raw_predictors),
+        "target_valid",
+        *target_column_names(config),
+    }
+    for station_id in station_ids:
+        if station_id in engineered_station_ids:
+            continue
+        forbidden = [
+            f"{station_id}__{column}"
+            for column in derived_columns
+            if f"{station_id}__{column}" in train_features.columns
+            or f"{station_id}__{column}" in test_features.columns
+        ]
+        if forbidden:
+            raise ValueError(
+                f"non-engineered stations must not contain derived columns: {forbidden}"
+            )
+    predictor_columns = _joined_predictor_columns(
+        station_ids, engineered_station_ids, config
+    )
+    target_columns = [
+        f"{station_id}__{column}"
+        for station_id in engineered_station_ids
+        for column in target_column_names(config)
+    ]
+
     output_dir.mkdir(parents=True, exist_ok=True)
     train_path = output_dir / "all_stations_train_features.parquet"
     test_path = output_dir / "all_stations_test_features.parquet"
@@ -513,22 +576,12 @@ def write_joined_feature_artifacts(
     train_features.to_parquet(train_path, index=False)
     test_features.to_parquet(test_path, index=False)
 
-    predictor_columns = [
-        f"{station_id}__{column}"
-        for station_id in station_ids
-        for column in feature_column_names(config)
-    ]
-    target_columns = [
-        f"{station_id}__{column}"
-        for station_id in station_ids
-        for column in target_column_names(config)
-    ]
-
     generator_path = Path(__file__)
     metadata: dict[str, Any] = {
         "schema_version": "1.0",
         "generated_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "station_ids": list(station_ids),
+        "station_ids": station_ids,
+        "engineered_station_ids": engineered_station_ids,
         "configuration": {
             "horizon_hours": config.horizon_hours,
             "calendar_timezone": config.calendar_timezone,
@@ -542,7 +595,7 @@ def write_joined_feature_artifacts(
             "rolling": "Trailing windows include t, require every source value, and never read future rows.",
             "target": "water_level at t+1 through t+horizon_hours; the full vector is null unless target_valid is true.",
             "physical_independence": "Train and sealed-test features are calculated separately; unavailable lookback rows remain null.",
-            "station_scope": "Each station's predictors and targets are calculated from its own timeline only; unavailable stations retain null derived columns.",
+            "station_scope": "All joined station_ids are preserved. Full predictors, target_valid, and target vectors are calculated only for engineered_station_ids; other stations contribute raw water_level, imputed, and weather predictors, while their station_id columns remain raw metadata only.",
         },
         "inputs": {
             "train": _frame_profile(train_source, train_source_path),
