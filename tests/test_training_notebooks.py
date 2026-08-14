@@ -10,12 +10,20 @@ from src.config import FORECAST_HORIZON_HOURS, TARGET_STATION_ID
 NOTEBOOK_PATH = Path("04_train_ridge.ipynb")
 
 
-def _cell_source(notebook: dict, cell_id: str) -> str:
-    for cell in notebook["cells"]:
-        if cell.get("id") == cell_id:
-            source = cell["source"]
-            return "".join(source) if isinstance(source, list) else source
-    raise AssertionError(f"Notebook cell {cell_id!r} not found")
+def _cell_source(notebook: dict, tag: str) -> str:
+    matching_cells = [
+        cell
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code"
+        and tag in cell.get("metadata", {}).get("tags", [])
+    ]
+    if len(matching_cells) != 1:
+        raise AssertionError(
+            f"Expected exactly one code cell tagged {tag!r}, "
+            f"found {len(matching_cells)}"
+        )
+    source = matching_cells[0]["source"]
+    return "".join(source) if isinstance(source, list) else source
 
 
 def test_ridge_notebook_wires_shared_loading_subsets_and_cohorts(
@@ -72,14 +80,14 @@ def test_ridge_notebook_wires_shared_loading_subsets_and_cohorts(
     frame.to_parquet(train_path, index=False)
     frame.iloc[[1]].to_parquet(test_path, index=False)
 
-    setup_source = _cell_source(notebook, "3").replace(
+    setup_source = _cell_source(notebook, "ridge-setup").replace(
         'PROCESSED_DIR = Path("data/processed/joined")',
         f"PROCESSED_DIR = Path({str(processed_dir)!r})",
     )
     namespace: dict = {}
     exec(setup_source, namespace)  # noqa: S102
-    exec(_cell_source(notebook, "10"), namespace)  # noqa: S102
-    exec(_cell_source(notebook, "12"), namespace)  # noqa: S102
+    exec(_cell_source(notebook, "ridge-load-artifacts"), namespace)  # noqa: S102
+    exec(_cell_source(notebook, "ridge-prepare-cohort"), namespace)  # noqa: S102
 
     assert namespace["contract"].station_id == station_id
     assert namespace["FULL_FEATURE_COLUMNS"] == predictor_columns
@@ -99,13 +107,15 @@ def test_ridge_notebook_wires_shared_loading_subsets_and_cohorts(
         "train_input_sha256": hashlib.sha256(train_path.read_bytes()).hexdigest(),
         "test_input_sha256": hashlib.sha256(test_path.read_bytes()).hexdigest(),
     }
-    assert "absolute_error_boxplot_payload(" in _cell_source(notebook, "18")
+    assert "absolute_error_boxplot_payload(" in _cell_source(
+        notebook, "ridge-evaluation"
+    )
 
 
 def test_ridge_notebook_logs_input_hashes_on_every_mlflow_run() -> None:
     notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
-    cv_source = _cell_source(notebook, "14")
-    test_source = _cell_source(notebook, "18")
+    cv_source = _cell_source(notebook, "ridge-cross-validation")
+    test_source = _cell_source(notebook, "ridge-evaluation")
 
     assert cv_source.count("**INPUT_PARQUET_SHA256_PARAMS") == 2
     assert test_source.count("**INPUT_PARQUET_SHA256_PARAMS") == 1
@@ -114,7 +124,7 @@ def test_ridge_notebook_logs_input_hashes_on_every_mlflow_run() -> None:
 def test_ridge_candidate_selection_applies_all_tie_breakers() -> None:
     notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
     namespace: dict = {"pd": pd}
-    exec(_cell_source(notebook, "6"), namespace)  # noqa: S102
+    exec(_cell_source(notebook, "ridge-selection"), namespace)  # noqa: S102
     select_candidate = namespace["select_candidate"]
 
     assert select_candidate(
