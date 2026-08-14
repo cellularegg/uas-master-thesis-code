@@ -1,9 +1,13 @@
 import hashlib
 import json
+import sys
+import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.config import FORECAST_HORIZON_HOURS, TARGET_STATION_ID
 
@@ -24,6 +28,109 @@ def _cell_source(notebook: dict, tag: str) -> str:
         )
     source = matching_cells[0]["source"]
     return "".join(source) if isinstance(source, list) else source
+
+
+def _ridge_model_comparison_source() -> str:
+    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
+    comparison_cells = [
+        cell
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code"
+        and any(
+            tag == "ridge-model-comparison" or tag.startswith("ridge-model-comparison-")
+            for tag in cell.get("metadata", {}).get("tags", [])
+        )
+    ]
+    return "".join(
+        "".join(cell["source"]) if isinstance(cell["source"], list) else cell["source"]
+        for cell in comparison_cells
+    )
+
+
+def _comparison_runs(
+    execution_uuid: str,
+    end_time: str,
+    *,
+    selected_subset: str = "lean",
+    selected_alpha: str = "0.1",
+    selected_test_mae: float = 7.5,
+    duplicate_candidate: bool = False,
+    lean_cv_mae: float = 1.0,
+) -> pd.DataFrame:
+    rows = []
+    candidates = [
+        ("lean", "0.1", 2, lean_cv_mae),
+        ("wide", "1.0", 5, lean_cv_mae + 1.0),
+    ]
+    for candidate_number, (subset, alpha, feature_count, cv_mae) in enumerate(
+        candidates, start=1
+    ):
+        rows.append(
+            {
+                "run_id": f"{execution_uuid}-candidate-{candidate_number}",
+                "status": "FINISHED",
+                "end_time": end_time,
+                "tags.run_type": "candidate_parent",
+                "tags.execution_uuid": execution_uuid,
+                "tags.subset": subset,
+                "params.alpha": alpha,
+                "params.feature_count": str(feature_count),
+                "metrics.cv_mae_mean": cv_mae,
+                "metrics.cv_mae_std": 0.1,
+                "metrics.cv_rmse_mean": cv_mae + 0.2,
+                "metrics.cv_rmse_std": 0.2,
+            }
+        )
+    if duplicate_candidate:
+        rows.append(rows[0].copy())
+
+    sealed_test_row = {
+        "run_id": f"{execution_uuid}-sealed-test",
+        "status": "FINISHED",
+        "end_time": end_time,
+        "tags.run_type": "sealed_test",
+        "tags.execution_uuid": execution_uuid,
+        "tags.subset": selected_subset,
+        "params.alpha": selected_alpha,
+        "metrics.test_mae": selected_test_mae,
+        "metrics.test_rmse": selected_test_mae + 1.0,
+    }
+    for horizon in (1, 2):
+        sealed_test_row[f"metrics.test_mae_horizon_{horizon:02d}"] = (
+            selected_test_mae + horizon
+        )
+        sealed_test_row[f"metrics.test_rmse_horizon_{horizon:02d}"] = (
+            selected_test_mae + horizon + 1.0
+        )
+    rows.append(sealed_test_row)
+    return pd.DataFrame(rows)
+
+
+class _FakeMlflow(types.ModuleType):
+    def __init__(self, runs: pd.DataFrame) -> None:
+        super().__init__("mlflow")
+        self.runs = runs
+        self.tracking_uri = None
+
+    def set_tracking_uri(self, tracking_uri: str) -> None:
+        self.tracking_uri = tracking_uri
+
+    def get_experiment_by_name(self, name: str) -> SimpleNamespace:
+        assert name == "ridge"
+        return SimpleNamespace(experiment_id="ridge-experiment")
+
+    def search_runs(self, *, experiment_ids: list[str]) -> pd.DataFrame:
+        assert experiment_ids == ["ridge-experiment"]
+        return self.runs.copy()
+
+
+def _execute_ridge_model_comparison(
+    runs: pd.DataFrame, monkeypatch: pytest.MonkeyPatch
+) -> dict:
+    monkeypatch.setitem(sys.modules, "mlflow", _FakeMlflow(runs))
+    namespace: dict = {}
+    exec(_ridge_model_comparison_source(), namespace)  # noqa: S102
+    return namespace
 
 
 def test_ridge_notebook_wires_shared_loading_subsets_and_cohorts(
@@ -159,3 +266,89 @@ def test_ridge_candidate_selection_applies_all_tie_breakers() -> None:
             ]
         )
     ) == ("Alpha", 0.1)
+
+
+def test_ridge_model_comparison_is_standalone_read_only_and_plotly_based() -> None:
+    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
+    source = _ridge_model_comparison_source()
+    section_start = next(
+        index
+        for index, cell in enumerate(notebook["cells"])
+        if cell.get("cell_type") == "markdown"
+        and cell.get("source", [""])[0] == "# Ridge MLflow candidate comparison\n"
+    )
+    section_cells = notebook["cells"][section_start:]
+
+    assert len([cell for cell in section_cells if cell["cell_type"] == "code"]) == 6
+    assert len([cell for cell in section_cells if cell["cell_type"] == "markdown"]) == 6
+    assert (
+        sum(
+            "## " in "".join(cell.get("source", []))
+            for cell in section_cells
+            if cell["cell_type"] == "markdown"
+        )
+        == 5
+    )
+    assert "import mlflow" in source
+    assert "from src.config import MLFLOW_TRACKING_URI" in source
+    assert "import pandas as pd" in source
+    assert "import plotly.graph_objects as go" in source
+    assert "from IPython.display import display" in source
+    assert "mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)" in source
+    assert "mlflow.get_experiment_by_name" in source
+    assert "mlflow.search_runs(" in source
+    assert "mlflow.start_run" not in source
+    assert "write_text" not in source
+    assert "log_metrics" not in source
+
+
+def test_ridge_model_comparison_skips_newer_invalid_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs = pd.concat(
+        [
+            _comparison_runs(
+                "new-execution",
+                "2025-02-01T00:00:00Z",
+                duplicate_candidate=True,
+            ),
+            _comparison_runs("old-execution", "2025-01-01T00:00:00Z"),
+        ],
+        ignore_index=True,
+    )
+
+    namespace = _execute_ridge_model_comparison(runs, monkeypatch)
+
+    assert namespace["selected_execution_uuid"] == "old-execution"
+    assert len(namespace["candidate_comparison_table"]) == 2
+
+
+def test_ridge_model_comparison_reports_missing_mlflow_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="Run 04_train_ridge.ipynb"):
+        _execute_ridge_model_comparison(pd.DataFrame(), monkeypatch)
+
+
+def test_ridge_model_comparison_uses_cv_for_candidates_and_test_for_selected_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs = _comparison_runs(
+        "valid-execution",
+        "2025-01-01T00:00:00Z",
+        selected_subset="wide",
+        selected_alpha="1.0",
+        selected_test_mae=7.5,
+        lean_cv_mae=1.0,
+    )
+
+    namespace = _execute_ridge_model_comparison(runs, monkeypatch)
+    candidate_table = namespace["candidate_comparison_table"]
+    selected_summary = namespace["selected_candidate_sealed_test_summary"]
+
+    assert candidate_table["subset"].tolist() == ["lean", "wide"]
+    assert candidate_table["cv_mae_mean"].tolist() == [1.0, 2.0]
+    assert "test_mae" not in candidate_table.columns
+    assert len(selected_summary) == 1
+    assert selected_summary.loc[0, "subset"] == "wide"
+    assert selected_summary.loc[0, "test_mae"] == 7.5
