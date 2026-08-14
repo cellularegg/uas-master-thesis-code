@@ -224,3 +224,4 @@ mlflow.db
 
 # Local OS / IDE files
 .DS_Store
+PLAN.md
