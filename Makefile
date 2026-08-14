@@ -21,6 +21,26 @@ clean:
 	find . -type f -name "*.py[co]" -delete
 	find . -type d -name "__pycache__" -delete
 
+## Delete all local MLflow tracking data (requires two confirmations)
+.PHONY: clean-mlflow
+clean-mlflow:
+	@printf '%s\n' 'WARNING: this permanently deletes mlflow.db and mlruns/.'; \
+	printf '%s' "First confirmation: type 'yes' to continue: "; \
+	read -r confirmation; \
+	if [ "$$confirmation" != "yes" ]; then \
+		printf '%s\n' 'Aborted.'; \
+		exit 1; \
+	fi; \
+	printf '%s' "Second confirmation: type 'yes' to permanently delete the data: "; \
+	read -r confirmation; \
+	if [ "$$confirmation" != "yes" ]; then \
+		printf '%s\n' 'Aborted.'; \
+		exit 1; \
+	fi; \
+	rm -rf -- mlruns; \
+	rm -f -- mlflow.db; \
+	printf '%s\n' 'MLflow data deleted.'
+
 ## Lint using ruff (use `make format` to do formatting)
 .PHONY: lint
 lint:
