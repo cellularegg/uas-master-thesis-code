@@ -21,8 +21,12 @@ def test_metric_tables_calculates_aggregate_and_horizon_metrics():
     assert aggregate.loc[0, "scored_values"] == 4
     assert aggregate.loc[0, "mae"] == pytest.approx(1.75)
     assert aggregate.loc[0, "rmse"] == pytest.approx(np.sqrt(3.75))
+    assert aggregate.loc[0, "me"] == pytest.approx(-0.25)
+    assert aggregate.loc[0, "r2"] == pytest.approx(-2.0)
     assert per_horizon["target"].tolist() == ["target_01", "target_02"]
     assert per_horizon["mae"].tolist() == pytest.approx([1.5, 2.0])
+    assert per_horizon["me"].tolist() == pytest.approx([1.5, -2.0])
+    assert per_horizon["r2"].tolist() == pytest.approx([-1.5, -4.0])
 
 
 def test_metric_tables_rejects_prediction_shape_mismatch():

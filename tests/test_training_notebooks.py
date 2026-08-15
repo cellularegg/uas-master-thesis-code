@@ -79,6 +79,10 @@ def _comparison_runs(
                 "metrics.cv_mae_std": 0.1,
                 "metrics.cv_rmse_mean": cv_mae + 0.2,
                 "metrics.cv_rmse_std": 0.2,
+                "metrics.cv_me_mean": 0.1,
+                "metrics.cv_me_std": 0.05,
+                "metrics.cv_r2_mean": 0.5,
+                "metrics.cv_r2_std": 0.1,
             }
         )
     if duplicate_candidate:
@@ -94,14 +98,18 @@ def _comparison_runs(
         "params.alpha": selected_alpha,
         "metrics.test_mae": selected_test_mae,
         "metrics.test_rmse": selected_test_mae + 1.0,
+        "metrics.test_me": 0.25,
+        "metrics.test_r2": 0.75,
     }
-    for horizon in (1, 2):
+    for horizon in range(1, FORECAST_HORIZON_HOURS + 1):
         sealed_test_row[f"metrics.test_mae_horizon_{horizon:02d}"] = (
             selected_test_mae + horizon
         )
         sealed_test_row[f"metrics.test_rmse_horizon_{horizon:02d}"] = (
             selected_test_mae + horizon + 1.0
         )
+        sealed_test_row[f"metrics.test_me_horizon_{horizon:02d}"] = 0.25
+        sealed_test_row[f"metrics.test_r2_horizon_{horizon:02d}"] = 0.75
     rows.append(sealed_test_row)
     return pd.DataFrame(rows)
 
@@ -110,7 +118,7 @@ class _FakeMlflow(types.ModuleType):
     def __init__(self, runs: pd.DataFrame) -> None:
         super().__init__("mlflow")
         self.runs = runs
-        self.tracking_uri = None
+        self.tracking_uri: str | None = None
 
     def set_tracking_uri(self, tracking_uri: str) -> None:
         self.tracking_uri = tracking_uri
@@ -124,13 +132,137 @@ class _FakeMlflow(types.ModuleType):
         return self.runs.copy()
 
 
-def _execute_ridge_model_comparison(
+def _execute_ridge_model_selection(
     runs: pd.DataFrame, monkeypatch: pytest.MonkeyPatch
 ) -> dict:
     monkeypatch.setitem(sys.modules, "mlflow", _FakeMlflow(runs))
     namespace: dict = {}
-    exec(_ridge_model_comparison_source(), namespace)  # noqa: S102
+    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
+    excluded_tags = {
+        "ridge-model-comparison-model",
+        "ridge-model-comparison-predictions",
+        "ridge-model-comparison-error-charts",
+    }
+    selection_cells = [
+        cell
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code"
+        and any(
+            tag == "ridge-model-comparison" or tag.startswith("ridge-model-comparison-")
+            for tag in cell.get("metadata", {}).get("tags", [])
+        )
+        and not excluded_tags.intersection(cell.get("metadata", {}).get("tags", []))
+    ]
+    exec(  # noqa: S102
+        "".join("".join(cell["source"]) for cell in selection_cells),
+        namespace,
+    )
     return namespace
+
+
+class _FakeSavedRidge:
+    def __init__(self) -> None:
+        self.predictor_values: pd.DataFrame | None = None
+
+    def predict(self, predictors: pd.DataFrame) -> np.ndarray:
+        self.predictor_values = predictors.copy()
+        row_numbers = np.arange(len(predictors), dtype=float)[:, None]
+        horizon_numbers = np.arange(1, FORECAST_HORIZON_HOURS + 1, dtype=float)[None, :]
+        return row_numbers * 10.0 + horizon_numbers + 100.0
+
+
+def _write_comparison_artifacts(
+    root: Path,
+    *,
+    execution_uuid: str,
+    manifest_execution_uuid: str | None = None,
+) -> _FakeSavedRidge:
+    processed_dir = root / "data" / "processed" / "joined"
+    processed_dir.mkdir(parents=True)
+    model_dir = root / "models"
+    model_dir.mkdir()
+    station_id = TARGET_STATION_ID
+    predictor_columns = [
+        f"{station_id}__water_level",
+        f"{station_id}__imputed",
+        f"{station_id}__precipitation",
+        f"{station_id}__temperature_2m",
+        "station-b__water_level",
+    ]
+    target_columns = [
+        f"{station_id}__target_t_plus_{horizon:02d}"
+        for horizon in range(1, FORECAST_HORIZON_HOURS + 1)
+    ]
+    metadata = {
+        "engineered_station_ids": [station_id],
+        "configuration": {"horizon_hours": FORECAST_HORIZON_HOURS},
+        "predictor_columns": predictor_columns,
+        "target_columns": target_columns,
+    }
+    (processed_dir / "all_stations_feature_metadata.json").write_text(
+        json.dumps(metadata), encoding="utf-8"
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2024-01-03 00:00", "2024-01-01 00:00", "2024-01-02 00:00"],
+                utc=True,
+            ),
+            f"{station_id}__target_valid": True,
+        }
+    )
+    for predictor_number, column in enumerate(predictor_columns, start=1):
+        frame[column] = predictor_number + np.arange(len(frame), dtype=float)
+    for horizon, column in enumerate(target_columns, start=1):
+        frame[column] = 10.0 * np.arange(len(frame), dtype=float) + horizon
+    frame.to_parquet(processed_dir / "all_stations_train_features.parquet", index=False)
+    frame.to_parquet(processed_dir / "all_stations_test_features.parquet", index=False)
+
+    selected_feature_columns = predictor_columns[:2]
+    manifest = {
+        "schema_version": "1.1",
+        "execution_uuid": manifest_execution_uuid or execution_uuid,
+        "station_id": station_id,
+        "forecast_horizon_hours": FORECAST_HORIZON_HOURS,
+        "full_feature_columns": predictor_columns,
+        "selected_subset": "lean",
+        "feature_subset": "lean",
+        "selected_feature_columns": selected_feature_columns,
+        "target_columns": target_columns,
+        "selected_alpha": 0.1,
+    }
+    (model_dir / f"ridge_{station_id}.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    (model_dir / f"ridge_{station_id}.joblib").touch()
+    return _FakeSavedRidge()
+
+
+def _execute_ridge_model_comparison_with_artifacts(
+    runs: pd.DataFrame,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    manifest_execution_uuid: str | None = None,
+) -> tuple[dict, _FakeSavedRidge]:
+    model = _write_comparison_artifacts(
+        tmp_path,
+        execution_uuid=str(
+            runs.loc[
+                runs["tags.run_type"].eq("sealed_test"), "tags.execution_uuid"
+            ].iloc[0]
+        ),
+        manifest_execution_uuid=manifest_execution_uuid,
+    )
+    import joblib
+
+    source = _ridge_model_comparison_source()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(joblib, "load", lambda _path: model)
+    monkeypatch.setitem(sys.modules, "mlflow", _FakeMlflow(runs))
+    namespace: dict = {}
+    exec(source, namespace)  # noqa: S102
+    return namespace, model
 
 
 def test_ridge_notebook_wires_shared_loading_subsets_and_cohorts(
@@ -237,35 +369,103 @@ def test_ridge_candidate_selection_applies_all_tie_breakers() -> None:
     assert select_candidate(
         pd.DataFrame(
             [
-                {"subset": "Wide", "alpha": 0.1, "feature_count": 10, "mae_mean": 2.0},
-                {"subset": "Lean", "alpha": 0.1, "feature_count": 2, "mae_mean": 1.0},
+                {
+                    "subset": "Wide",
+                    "alpha": 0.1,
+                    "feature_count": 10,
+                    "mae_mean": 2.0,
+                    "rmse_mean": 2.0,
+                },
+                {
+                    "subset": "Lean",
+                    "alpha": 0.1,
+                    "feature_count": 2,
+                    "mae_mean": 1.0,
+                    "rmse_mean": 1.0,
+                },
             ]
         )
     ) == ("Lean", 0.1)
     assert select_candidate(
         pd.DataFrame(
             [
-                {"subset": "Wide", "alpha": 0.01, "feature_count": 10, "mae_mean": 1.0},
-                {"subset": "Lean", "alpha": 0.1, "feature_count": 2, "mae_mean": 1.0},
+                {
+                    "subset": "Wide",
+                    "alpha": 0.01,
+                    "feature_count": 10,
+                    "mae_mean": 1.0,
+                    "rmse_mean": 1.0,
+                },
+                {
+                    "subset": "Lean",
+                    "alpha": 0.1,
+                    "feature_count": 2,
+                    "mae_mean": 1.0,
+                    "rmse_mean": 1.0,
+                },
             ]
         )
     ) == ("Lean", 0.1)
     assert select_candidate(
         pd.DataFrame(
             [
-                {"subset": "Same", "alpha": 1.0, "feature_count": 2, "mae_mean": 1.0},
-                {"subset": "Same", "alpha": 0.1, "feature_count": 2, "mae_mean": 1.0},
+                {
+                    "subset": "Same",
+                    "alpha": 1.0,
+                    "feature_count": 2,
+                    "mae_mean": 1.0,
+                    "rmse_mean": 1.0,
+                },
+                {
+                    "subset": "Same",
+                    "alpha": 0.1,
+                    "feature_count": 2,
+                    "mae_mean": 1.0,
+                    "rmse_mean": 1.0,
+                },
             ]
         )
     ) == ("Same", 0.1)
     assert select_candidate(
         pd.DataFrame(
             [
-                {"subset": "Zulu", "alpha": 0.1, "feature_count": 2, "mae_mean": 1.0},
-                {"subset": "Alpha", "alpha": 0.1, "feature_count": 2, "mae_mean": 1.0},
+                {
+                    "subset": "Zulu",
+                    "alpha": 0.1,
+                    "feature_count": 2,
+                    "mae_mean": 1.0,
+                    "rmse_mean": 1.0,
+                },
+                {
+                    "subset": "Alpha",
+                    "alpha": 0.1,
+                    "feature_count": 2,
+                    "mae_mean": 1.0,
+                    "rmse_mean": 1.0,
+                },
             ]
         )
     ) == ("Alpha", 0.1)
+    different_metrics = pd.DataFrame(
+        [
+            {
+                "subset": "Low MAE",
+                "alpha": 0.1,
+                "feature_count": 2,
+                "mae_mean": 1.0,
+                "rmse_mean": 4.0,
+            },
+            {
+                "subset": "Low RMSE",
+                "alpha": 0.1,
+                "feature_count": 2,
+                "mae_mean": 2.0,
+                "rmse_mean": 1.0,
+            },
+        ]
+    )
+    assert select_candidate(different_metrics) == ("Low RMSE", 0.1)
+    assert select_candidate(different_metrics, metric="mae") == ("Low MAE", 0.1)
 
 
 def test_ridge_model_comparison_is_standalone_read_only_and_plotly_based() -> None:
@@ -279,24 +479,35 @@ def test_ridge_model_comparison_is_standalone_read_only_and_plotly_based() -> No
     )
     section_cells = notebook["cells"][section_start:]
 
-    assert len([cell for cell in section_cells if cell["cell_type"] == "code"]) == 6
-    assert len([cell for cell in section_cells if cell["cell_type"] == "markdown"]) == 6
+    assert len([cell for cell in section_cells if cell["cell_type"] == "code"]) == 12
+    assert len([cell for cell in section_cells if cell["cell_type"] == "markdown"]) == 8
     assert (
         sum(
             "## " in "".join(cell.get("source", []))
             for cell in section_cells
             if cell["cell_type"] == "markdown"
         )
-        == 5
+        == 7
     )
     assert "import mlflow" in source
-    assert "from src.config import MLFLOW_TRACKING_URI" in source
+    assert "CV_SELECTION_METRIC," in source
+    assert "MLFLOW_TRACKING_URI," in source
     assert "import pandas as pd" in source
     assert "import plotly.graph_objects as go" in source
     assert "from IPython.display import display" in source
     assert "mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)" in source
     assert "mlflow.get_experiment_by_name" in source
     assert "mlflow.search_runs(" in source
+    assert "from joblib import load as load_joblib" in source
+    assert "load_joined_training_data(" in source
+    assert "prepare_model_rows(" in source
+    assert "validate_predictions(" in source
+    assert "go.Scattergl" in source
+    assert "go.Box" in source
+    assert "boxpoints=False" in source
+    assert "signed_errors =" in source
+    assert "issue_time" in source
+    assert "sliders" in source
     assert "mlflow.start_run" not in source
     assert "write_text" not in source
     assert "log_metrics" not in source
@@ -317,7 +528,7 @@ def test_ridge_model_comparison_skips_newer_invalid_execution(
         ignore_index=True,
     )
 
-    namespace = _execute_ridge_model_comparison(runs, monkeypatch)
+    namespace = _execute_ridge_model_selection(runs, monkeypatch)
 
     assert namespace["selected_execution_uuid"] == "old-execution"
     assert len(namespace["candidate_comparison_table"]) == 2
@@ -327,7 +538,7 @@ def test_ridge_model_comparison_reports_missing_mlflow_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with pytest.raises(ValueError, match="Run 04_train_ridge.ipynb"):
-        _execute_ridge_model_comparison(pd.DataFrame(), monkeypatch)
+        _execute_ridge_model_selection(pd.DataFrame(), monkeypatch)
 
 
 def test_ridge_model_comparison_uses_cv_for_candidates_and_test_for_selected_only(
@@ -342,7 +553,7 @@ def test_ridge_model_comparison_uses_cv_for_candidates_and_test_for_selected_onl
         lean_cv_mae=1.0,
     )
 
-    namespace = _execute_ridge_model_comparison(runs, monkeypatch)
+    namespace = _execute_ridge_model_selection(runs, monkeypatch)
     candidate_table = namespace["candidate_comparison_table"]
     selected_summary = namespace["selected_candidate_sealed_test_summary"]
 
@@ -352,3 +563,156 @@ def test_ridge_model_comparison_uses_cv_for_candidates_and_test_for_selected_onl
     assert len(selected_summary) == 1
     assert selected_summary.loc[0, "subset"] == "wide"
     assert selected_summary.loc[0, "test_mae"] == 7.5
+
+
+def test_ridge_model_comparison_ranks_by_configured_rmse_metric(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs = _comparison_runs("rmse-ranked-execution", "2025-01-01T00:00:00Z")
+    runs.loc[runs["tags.subset"].eq("lean"), "metrics.cv_rmse_mean"] = 5.0
+    runs.loc[runs["tags.subset"].eq("wide"), "metrics.cv_rmse_mean"] = 1.0
+
+    namespace = _execute_ridge_model_selection(runs, monkeypatch)
+
+    assert namespace["candidate_comparison_table"]["subset"].tolist() == [
+        "wide",
+        "lean",
+    ]
+
+
+def test_ridge_model_comparison_skips_legacy_metric_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_runs = _comparison_runs("legacy-execution", "2025-01-01T00:00:00Z")
+    legacy_metric_columns = [
+        column
+        for column in legacy_runs.columns
+        if any(
+            metric in str(column) for metric in ("cv_me", "cv_r2", "test_me", "test_r2")
+        )
+    ]
+    legacy_runs = legacy_runs.drop(columns=legacy_metric_columns)
+
+    with pytest.raises(ValueError, match="No valid Ridge MLflow execution exists"):
+        _execute_ridge_model_selection(legacy_runs, monkeypatch)
+
+
+def test_ridge_saved_model_scores_all_horizons_and_aligns_h_plus_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _comparison_runs("saved-model-execution", "2025-01-01T00:00:00Z")
+
+    namespace, model = _execute_ridge_model_comparison_with_artifacts(
+        runs, tmp_path, monkeypatch
+    )
+
+    predictions = namespace["comparison_prediction_values"]
+    assert predictions.shape == (3, FORECAST_HORIZON_HOURS)
+    assert model.predictor_values is not None
+    assert model.predictor_values.shape == (3, 2)
+    assert namespace["comparison_prediction_table"].columns.tolist() == [
+        "issue_time",
+        *namespace["COMPARISON_TARGET_COLUMNS"],
+        *namespace["comparison_prediction_columns"],
+    ]
+    assert namespace["comparison_prediction_table"]["issue_time"].tolist() == list(
+        pd.to_datetime(
+            ["2024-01-01 00:00", "2024-01-02 00:00", "2024-01-03 00:00"],
+            utc=True,
+        )
+    )
+
+    horizon_two_frame = namespace["comparison_time_series_frames"][1]
+    table = namespace["comparison_prediction_table"]
+    expected_valid_times = table["issue_time"] + pd.to_timedelta(2, unit="h")
+    pd.testing.assert_index_equal(
+        pd.DatetimeIndex(pd.to_datetime(horizon_two_frame.data[0].x, utc=True)),
+        pd.DatetimeIndex(expected_valid_times).rename(None),
+    )
+    assert list(horizon_two_frame.data[0].y) == list(
+        table[namespace["COMPARISON_TARGET_COLUMNS"][1]]
+    )
+    assert list(horizon_two_frame.data[1].y) == list(
+        table[namespace["comparison_prediction_columns"][1]]
+    )
+    assert all(trace.mode == "lines+markers" for trace in horizon_two_frame.data)
+    assert all(trace.type == "scattergl" for trace in horizon_two_frame.data)
+    pd.testing.assert_index_equal(
+        pd.DatetimeIndex(
+            pd.to_datetime(horizon_two_frame.data[0].customdata, utc=True)
+        ),
+        pd.DatetimeIndex(table["issue_time"]).rename(None),
+    )
+
+
+def test_ridge_saved_model_error_figures_use_signed_errors_and_all_horizons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _comparison_runs("error-figure-execution", "2025-01-01T00:00:00Z")
+
+    namespace, _model = _execute_ridge_model_comparison_with_artifacts(
+        runs, tmp_path, monkeypatch
+    )
+
+    actual = namespace["comparison_actual_values"]
+    predictions = namespace["comparison_prediction_values"]
+    signed_errors = predictions - actual
+    signed_figure = namespace["signed_error_boxplot_figure"]
+    absolute_figure = namespace["absolute_error_boxplot_figure"]
+    expected_horizons = list(range(1, FORECAST_HORIZON_HOURS + 1))
+    expected_horizon_labels = [f"H+{horizon:02d}" for horizon in expected_horizons]
+    signed_box_traces = [trace for trace in signed_figure.data if trace.type == "box"]
+    absolute_box_traces = [
+        trace for trace in absolute_figure.data if trace.type == "box"
+    ]
+
+    assert len(signed_box_traces) == 1
+    assert len(absolute_box_traces) == 1
+    assert [trace.name for trace in signed_box_traces] == ["Boxplots"]
+    assert [trace.name for trace in absolute_box_traces] == ["Boxplots"]
+    for figure in (signed_figure, absolute_figure):
+        assert figure.layout.xaxis.type == "category"
+    np.testing.assert_allclose(signed_box_traces[0].y, signed_errors.reshape(-1))
+    np.testing.assert_allclose(
+        absolute_box_traces[0].y, np.abs(signed_errors).reshape(-1)
+    )
+    assert all(trace.boxpoints is False for trace in signed_box_traces)
+    assert all(trace.boxpoints is False for trace in absolute_box_traces)
+    expected_flattened_labels = expected_horizon_labels * len(signed_errors)
+    assert list(signed_box_traces[0].x) == expected_flattened_labels
+    assert list(absolute_box_traces[0].x) == expected_flattened_labels
+
+    signed_mean_trace = next(
+        trace for trace in signed_figure.data if trace.name == "Mean error"
+    )
+    assert list(signed_mean_trace.x) == expected_horizon_labels
+    np.testing.assert_allclose(signed_mean_trace.y, signed_errors.mean(axis=0))
+    absolute_marker_traces = {
+        trace.name: trace for trace in absolute_figure.data if trace.type == "scatter"
+    }
+    assert list(absolute_marker_traces["MAE"].x) == expected_horizon_labels
+    assert list(absolute_marker_traces["RMSE"].x) == expected_horizon_labels
+    np.testing.assert_allclose(
+        absolute_marker_traces["MAE"].y,
+        [7.5 + horizon for horizon in range(1, FORECAST_HORIZON_HOURS + 1)],
+    )
+    np.testing.assert_allclose(
+        absolute_marker_traces["RMSE"].y,
+        [8.5 + horizon for horizon in range(1, FORECAST_HORIZON_HOURS + 1)],
+    )
+    assert signed_figure.layout.shapes[0].y0 == 0
+    assert signed_figure.layout.shapes[0].y1 == 0
+
+
+def test_ridge_saved_model_rejects_manifest_execution_provenance_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _comparison_runs("provenance-execution", "2025-01-01T00:00:00Z")
+
+    with pytest.raises(ValueError, match="execution_uuid"):
+        _execute_ridge_model_comparison_with_artifacts(
+            runs,
+            tmp_path,
+            monkeypatch,
+            manifest_execution_uuid="different-execution",
+        )

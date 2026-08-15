@@ -346,8 +346,8 @@ def summarize_cv_metrics(
     """Summarize aggregate and per-horizon fold metrics for one candidate.
 
     Args:
-        fold_aggregate_metrics: One aggregate MAE and RMSE row per fold.
-        fold_horizon_metrics: Per-fold MAE and RMSE rows keyed by horizon.
+        fold_aggregate_metrics: One aggregate MAE, RMSE, ME, and R² row per fold.
+        fold_horizon_metrics: Per-fold metric rows keyed by horizon.
 
     Returns:
         Mean and population-standard-deviation metrics for the candidate.
@@ -357,10 +357,14 @@ def summarize_cv_metrics(
         "cv_mae_std": float(fold_aggregate_metrics["mae"].std(ddof=0)),
         "cv_rmse_mean": float(fold_aggregate_metrics["rmse"].mean()),
         "cv_rmse_std": float(fold_aggregate_metrics["rmse"].std(ddof=0)),
+        "cv_me_mean": float(fold_aggregate_metrics["me"].mean()),
+        "cv_me_std": float(fold_aggregate_metrics["me"].std(ddof=0)),
+        "cv_r2_mean": float(fold_aggregate_metrics["r2"].mean()),
+        "cv_r2_std": float(fold_aggregate_metrics["r2"].std(ddof=0)),
     }
     for horizon, horizon_metrics in fold_horizon_metrics.groupby("horizon_hours"):
         horizon_number = int(str(horizon))
-        for metric in ("mae", "rmse"):
+        for metric in ("mae", "rmse", "me", "r2"):
             summary[f"cv_{metric}_horizon_{horizon_number:02d}_mean"] = float(
                 horizon_metrics[metric].mean()
             )

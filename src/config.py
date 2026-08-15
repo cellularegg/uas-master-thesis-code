@@ -43,7 +43,7 @@ INITIAL_TRAIN_FRACTION = 0.50
 # Number of hourly rows left between each fold's training and validation data.
 EMBARGO_HOURS = 24
 # Aggregate CV metric used to select the best Ridge alpha.
-CV_SELECTION_METRIC = "mae"
+CV_SELECTION_METRIC = "rmse"
 
 # INCA weather dataset identifier used for weather feature retrieval.
 INCA_DATASET_ID = "inca-v1-1h-1km"

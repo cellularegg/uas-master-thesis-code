@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import (  # type: ignore[import-untyped]
     mean_absolute_error,
+    r2_score,
     root_mean_squared_error,
 )
 
@@ -17,7 +18,7 @@ def metric_tables(
     target_columns: Sequence[str],
     station_id: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Calculate aggregate and horizon-specific MAE/RMSE.
+    """Calculate aggregate and horizon-specific forecast metrics.
 
     Args:
         actual: Actual target values, with one column per forecast horizon.
@@ -27,6 +28,8 @@ def metric_tables(
 
     Returns:
         A tuple containing aggregate metrics and one row per forecast horizon.
+        ME is prediction minus actual, and aggregate R² is calculated after
+        flattening all horizons together.
     """
     target_columns = list(target_columns)
     missing_columns = sorted(set(target_columns).difference(actual.columns))
@@ -50,6 +53,8 @@ def metric_tables(
                 "rmse": root_mean_squared_error(
                     actual_values.ravel(), predictions.ravel()
                 ),
+                "me": float(np.mean(predictions.ravel() - actual_values.ravel())),
+                "r2": r2_score(actual_values.ravel(), predictions.ravel()),
             }
         ]
     )
@@ -63,6 +68,12 @@ def metric_tables(
                     actual_values[:, horizon - 1], predictions[:, horizon - 1]
                 ),
                 "rmse": root_mean_squared_error(
+                    actual_values[:, horizon - 1], predictions[:, horizon - 1]
+                ),
+                "me": float(
+                    np.mean(predictions[:, horizon - 1] - actual_values[:, horizon - 1])
+                ),
+                "r2": r2_score(
                     actual_values[:, horizon - 1], predictions[:, horizon - 1]
                 ),
             }

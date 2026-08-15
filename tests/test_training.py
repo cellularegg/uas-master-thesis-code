@@ -509,12 +509,16 @@ def test_validate_predictions_returns_finite_expected_shape() -> None:
 
 
 def test_summarize_cv_metrics_calculates_literal_fold_statistics() -> None:
-    fold_aggregate_metrics = pd.DataFrame({"mae": [1.0, 3.0], "rmse": [2.0, 4.0]})
+    fold_aggregate_metrics = pd.DataFrame(
+        {"mae": [1.0, 3.0], "rmse": [2.0, 4.0], "me": [1.0, 3.0], "r2": [2.0, 4.0]}
+    )
     fold_horizon_metrics = pd.DataFrame(
         {
             "horizon_hours": [1, 2, 1, 2],
             "mae": [1.0, 2.0, 3.0, 4.0],
             "rmse": [2.0, 3.0, 4.0, 5.0],
+            "me": [1.0, 2.0, 3.0, 4.0],
+            "r2": [2.0, 3.0, 4.0, 5.0],
         }
     )
 
@@ -528,14 +532,26 @@ def test_summarize_cv_metrics_calculates_literal_fold_statistics() -> None:
         "cv_mae_std": 1.0,
         "cv_rmse_mean": 3.0,
         "cv_rmse_std": 1.0,
+        "cv_me_mean": 2.0,
+        "cv_me_std": 1.0,
+        "cv_r2_mean": 3.0,
+        "cv_r2_std": 1.0,
         "cv_mae_horizon_01_mean": 2.0,
         "cv_mae_horizon_01_std": 1.0,
         "cv_rmse_horizon_01_mean": 3.0,
         "cv_rmse_horizon_01_std": 1.0,
+        "cv_me_horizon_01_mean": 2.0,
+        "cv_me_horizon_01_std": 1.0,
+        "cv_r2_horizon_01_mean": 3.0,
+        "cv_r2_horizon_01_std": 1.0,
         "cv_mae_horizon_02_mean": 3.0,
         "cv_mae_horizon_02_std": 1.0,
         "cv_rmse_horizon_02_mean": 4.0,
         "cv_rmse_horizon_02_std": 1.0,
+        "cv_me_horizon_02_mean": 3.0,
+        "cv_me_horizon_02_std": 1.0,
+        "cv_r2_horizon_02_mean": 4.0,
+        "cv_r2_horizon_02_std": 1.0,
     }
 
 
