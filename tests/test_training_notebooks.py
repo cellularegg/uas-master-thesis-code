@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go  # type: ignore[import-untyped]
 import pytest
 
 from src.config import FORECAST_HORIZON_HOURS, TARGET_STATION_ID
@@ -141,6 +142,9 @@ def _execute_ridge_model_selection(
     excluded_tags = {
         "ridge-model-comparison-model",
         "ridge-model-comparison-predictions",
+        "ridge-model-comparison-forecast-window-setup",
+        "ridge-model-comparison-best-forecast-window",
+        "ridge-model-comparison-worst-forecast-window",
         "ridge-model-comparison-error-charts",
     }
     selection_cells = [
@@ -468,6 +472,179 @@ def test_ridge_model_comparison_is_standalone_read_only_and_plotly_based() -> No
     assert "mlflow.start_run" not in source
     assert "write_text" not in source
     assert "log_metrics" not in source
+
+
+def test_ridge_forecast_window_cells_follow_heading_in_order() -> None:
+    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
+    heading_index = next(
+        index
+        for index, cell in enumerate(notebook["cells"])
+        if cell.get("cell_type") == "markdown"
+        and "## Inspect best and worst Ridge forecast windows"
+        in "".join(cell.get("source", []))
+    )
+    best_indices = [
+        index
+        for index, cell in enumerate(notebook["cells"])
+        if cell.get("cell_type") == "code"
+        and "ridge-model-comparison-best-forecast-window"
+        in cell.get("metadata", {}).get("tags", [])
+    ]
+    worst_indices = [
+        index
+        for index, cell in enumerate(notebook["cells"])
+        if cell.get("cell_type") == "code"
+        and "ridge-model-comparison-worst-forecast-window"
+        in cell.get("metadata", {}).get("tags", [])
+    ]
+
+    assert len(best_indices) == 1
+    assert len(worst_indices) == 1
+    assert best_indices[0] > heading_index
+    assert worst_indices[0] > best_indices[0]
+
+
+def test_ridge_forecast_window_selection_and_figures() -> None:
+    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
+    issue_times = pd.to_datetime(
+        [
+            "2024-01-01 00:00",
+            "2024-01-01 01:00",
+            "2024-01-02 00:00",
+            "2024-01-02 01:00",
+            "2024-01-05 00:00",
+            "2024-01-06 00:00",
+        ],
+        utc=True,
+    )
+    target_columns = [
+        f"{TARGET_STATION_ID}__target_t_plus_{horizon:02d}"
+        for horizon in range(1, FORECAST_HORIZON_HOURS + 1)
+    ]
+    prediction_columns = [f"prediction_{column}" for column in target_columns]
+    errors_by_issue = [1.0, 1.0, 5.0, 5.0, 0.0, 10.0]
+    comparison_prediction_table = pd.DataFrame(
+        {
+            "issue_time": issue_times,
+            **{column: np.zeros(len(issue_times)) for column in target_columns},
+            **{column: np.asarray(errors_by_issue) for column in prediction_columns},
+        }
+    )
+
+    context_times = pd.date_range(
+        "2023-12-30 00:00",
+        "2024-01-10 00:00",
+        freq="h",
+        tz="UTC",
+    )
+    water_level_column = f"{TARGET_STATION_ID}__water_level"
+    imputed_column = f"{TARGET_STATION_ID}__imputed"
+    context_source = pd.DataFrame(
+        {
+            "timestamp": context_times,
+            water_level_column: np.arange(len(context_times), dtype=float),
+            imputed_column: False,
+        }
+    )
+    incomplete_time = pd.Timestamp("2024-01-07 00:00", tz="UTC")
+    imputed_time = pd.Timestamp("2024-01-08 00:00", tz="UTC")
+    context_source = context_source.loc[
+        context_source["timestamp"] != incomplete_time
+    ].copy()
+    context_source.loc[context_source["timestamp"] == imputed_time, imputed_column] = (
+        True
+    )
+
+    namespace = {
+        "COMPARISON_TARGET_COLUMNS": target_columns,
+        "TARGET_STATION_ID": TARGET_STATION_ID,
+        "comparison_horizons": list(range(1, FORECAST_HORIZON_HOURS + 1)),
+        "comparison_prediction_columns": prediction_columns,
+        "comparison_prediction_table": comparison_prediction_table,
+        "_comparison_train_features": context_source,
+        "comparison_test_features": pd.DataFrame(
+            {
+                "timestamp": issue_times,
+                water_level_column: 0.0,
+                imputed_column: False,
+            }
+        ),
+        "display": lambda _figure: None,
+        "go": go,
+        "np": np,
+        "pd": pd,
+    }
+    exec(  # noqa: S102
+        _cell_source(notebook, "ridge-model-comparison-forecast-window-setup"),
+        namespace,
+    )
+    exec(  # noqa: S102
+        _cell_source(notebook, "ridge-model-comparison-best-forecast-window"),
+        namespace,
+    )
+    exec(  # noqa: S102
+        _cell_source(notebook, "ridge-model-comparison-worst-forecast-window"),
+        namespace,
+    )
+
+    assert namespace["best_forecast_window_row"]["issue_time"] == pd.Timestamp(
+        "2024-01-01", tz="UTC"
+    )
+    assert namespace["worst_forecast_window_row"]["issue_time"] == pd.Timestamp(
+        "2024-01-02", tz="UTC"
+    )
+    assert set(namespace["comparison_forecast_window_context_by_row"]) == {0, 1, 2, 3}
+    assert np.isclose(namespace["best_forecast_window_row"]["issue_rmse"], 1.0)
+    assert np.isclose(namespace["worst_forecast_window_row"]["issue_rmse"], 5.0)
+
+    for figure_name, selected_issue_time in (
+        ("best_ridge_forecast_window_figure", pd.Timestamp("2024-01-01", tz="UTC")),
+        ("worst_ridge_forecast_window_figure", pd.Timestamp("2024-01-02", tz="UTC")),
+    ):
+        figure = namespace[figure_name]
+        assert len(figure.data) == 2
+        assert figure.data[0].name == "Ground truth"
+        assert figure.data[1].name == "Prediction"
+        assert figure.data[0].mode == "lines+markers"
+        assert len(figure.frames) == len(figure.layout.sliders[0].steps) == 2
+        assert 0 <= figure.layout.sliders[0].active < len(figure.frames)
+        assert figure.layout.margin.b == 160
+        assert figure.layout.sliders[0].y == pytest.approx(-0.28)
+        assert figure.layout.sliders[0].pad.t == 12
+        assert all(len(frame.data) == 1 for frame in figure.frames)
+        assert all(list(frame.traces) == [1] for frame in figure.frames)
+        assert all(frame.data[0].name == "Prediction" for frame in figure.frames)
+        assert len(figure.frames[0].data[0].x) == FORECAST_HORIZON_HOURS
+        assert len(figure.frames[1].data[0].x) == FORECAST_HORIZON_HOURS
+        assert pd.Timestamp(
+            figure.frames[0].data[0].x[0]
+        ) == selected_issue_time + pd.to_timedelta(1, unit="h")
+        assert pd.Timestamp(
+            figure.frames[1].data[0].x[0]
+        ) == selected_issue_time + pd.to_timedelta(2, unit="h")
+        assert len(figure.data[0].x) == 97
+        assert len(figure.data[0].y) == 97
+        assert pd.Timestamp(
+            figure.data[0].x[0]
+        ) == selected_issue_time - pd.to_timedelta(48, unit="h")
+        assert pd.Timestamp(
+            figure.data[0].x[-1]
+        ) == selected_issue_time + pd.to_timedelta(48, unit="h")
+        assert len(figure.data[1].x) == FORECAST_HORIZON_HOURS
+        assert len(figure.data[1].y) == FORECAST_HORIZON_HOURS
+        assert pd.Timestamp(
+            figure.data[1].x[0]
+        ) == selected_issue_time + pd.to_timedelta(1, unit="h")
+        assert pd.Timestamp(
+            figure.data[1].x[-1]
+        ) == selected_issue_time + pd.to_timedelta(FORECAST_HORIZON_HOURS, unit="h")
+        assert figure.layout.xaxis.title.text == "Valid time"
+        assert len(figure.layout.shapes) == 1
+        assert any(
+            annotation.text == "Issue time" for annotation in figure.layout.annotations
+        )
+        assert selected_issue_time.isoformat() in figure.layout.title.text
+        assert "24-hour RMSE" in figure.layout.title.text
 
 
 def test_ridge_model_comparison_skips_newer_invalid_execution(
