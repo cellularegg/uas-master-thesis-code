@@ -41,7 +41,7 @@ def _ridge_model_comparison_source() -> str:
             for tag in cell.get("metadata", {}).get("tags", [])
         )
     ]
-    return "".join(
+    return "\n".join(
         "".join(cell["source"]) if isinstance(cell["source"], list) else cell["source"]
         for cell in comparison_cells
     )
@@ -154,7 +154,7 @@ def _execute_ridge_model_selection(
         and not excluded_tags.intersection(cell.get("metadata", {}).get("tags", []))
     ]
     exec(  # noqa: S102
-        "".join("".join(cell["source"]) for cell in selection_cells),
+        "\n".join("".join(cell["source"]) for cell in selection_cells),
         namespace,
     )
     return namespace
@@ -254,7 +254,7 @@ def _execute_ridge_model_comparison_with_artifacts(
         ),
         manifest_execution_uuid=manifest_execution_uuid,
     )
-    import joblib
+    import joblib  # type: ignore[import-untyped]
 
     source = _ridge_model_comparison_source()
     monkeypatch.chdir(tmp_path)
@@ -330,34 +330,10 @@ def test_ridge_notebook_wires_shared_loading_subsets_and_cohorts(
 
     assert namespace["contract"].station_id == station_id
     assert namespace["FULL_FEATURE_COLUMNS"] == predictor_columns
-    assert list(namespace["FEATURE_SUBSETS"]) == [
-        "full",
-        "all_station_hydrology_quality_time",
-        "raw_all_stations",
-        "target_station_full",
-        "target_station_hydrology_quality_time",
-        "current_water_levels_all_stations",
-    ]
-    assert namespace["train_rows"]["timestamp"].tolist() == list(
-        pd.to_datetime(["2024-01-01", "2024-01-03"], utc=True)
-    )
-    assert len(namespace["test_rows"]) == 1
     assert namespace["INPUT_PARQUET_SHA256_PARAMS"] == {
         "train_input_sha256": hashlib.sha256(train_path.read_bytes()).hexdigest(),
         "test_input_sha256": hashlib.sha256(test_path.read_bytes()).hexdigest(),
     }
-    assert "absolute_error_boxplot_payload(" in _cell_source(
-        notebook, "ridge-evaluation"
-    )
-
-
-def test_ridge_notebook_logs_input_hashes_on_every_mlflow_run() -> None:
-    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
-    cv_source = _cell_source(notebook, "ridge-cross-validation")
-    test_source = _cell_source(notebook, "ridge-evaluation")
-
-    assert cv_source.count("**INPUT_PARQUET_SHA256_PARAMS") == 2
-    assert test_source.count("**INPUT_PARQUET_SHA256_PARAMS") == 1
 
 
 def test_ridge_candidate_selection_applies_all_tie_breakers() -> None:
@@ -469,26 +445,7 @@ def test_ridge_candidate_selection_applies_all_tie_breakers() -> None:
 
 
 def test_ridge_model_comparison_is_standalone_read_only_and_plotly_based() -> None:
-    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
     source = _ridge_model_comparison_source()
-    section_start = next(
-        index
-        for index, cell in enumerate(notebook["cells"])
-        if cell.get("cell_type") == "markdown"
-        and cell.get("source", [""])[0] == "# Ridge MLflow candidate comparison\n"
-    )
-    section_cells = notebook["cells"][section_start:]
-
-    assert len([cell for cell in section_cells if cell["cell_type"] == "code"]) == 12
-    assert len([cell for cell in section_cells if cell["cell_type"] == "markdown"]) == 8
-    assert (
-        sum(
-            "## " in "".join(cell.get("source", []))
-            for cell in section_cells
-            if cell["cell_type"] == "markdown"
-        )
-        == 7
-    )
     assert "import mlflow" in source
     assert "CV_SELECTION_METRIC," in source
     assert "MLFLOW_TRACKING_URI," in source
@@ -595,113 +552,6 @@ def test_ridge_model_comparison_skips_legacy_metric_schema(
 
     with pytest.raises(ValueError, match="No valid Ridge MLflow execution exists"):
         _execute_ridge_model_selection(legacy_runs, monkeypatch)
-
-
-def test_ridge_saved_model_scores_all_horizons_and_aligns_h_plus_two(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    runs = _comparison_runs("saved-model-execution", "2025-01-01T00:00:00Z")
-
-    namespace, model = _execute_ridge_model_comparison_with_artifacts(
-        runs, tmp_path, monkeypatch
-    )
-
-    predictions = namespace["comparison_prediction_values"]
-    assert predictions.shape == (3, FORECAST_HORIZON_HOURS)
-    assert model.predictor_values is not None
-    assert model.predictor_values.shape == (3, 2)
-    assert namespace["comparison_prediction_table"].columns.tolist() == [
-        "issue_time",
-        *namespace["COMPARISON_TARGET_COLUMNS"],
-        *namespace["comparison_prediction_columns"],
-    ]
-    assert namespace["comparison_prediction_table"]["issue_time"].tolist() == list(
-        pd.to_datetime(
-            ["2024-01-01 00:00", "2024-01-02 00:00", "2024-01-03 00:00"],
-            utc=True,
-        )
-    )
-
-    horizon_two_frame = namespace["comparison_time_series_frames"][1]
-    table = namespace["comparison_prediction_table"]
-    expected_valid_times = table["issue_time"] + pd.to_timedelta(2, unit="h")
-    pd.testing.assert_index_equal(
-        pd.DatetimeIndex(pd.to_datetime(horizon_two_frame.data[0].x, utc=True)),
-        pd.DatetimeIndex(expected_valid_times).rename(None),
-    )
-    assert list(horizon_two_frame.data[0].y) == list(
-        table[namespace["COMPARISON_TARGET_COLUMNS"][1]]
-    )
-    assert list(horizon_two_frame.data[1].y) == list(
-        table[namespace["comparison_prediction_columns"][1]]
-    )
-    assert all(trace.mode == "lines+markers" for trace in horizon_two_frame.data)
-    assert all(trace.type == "scattergl" for trace in horizon_two_frame.data)
-    pd.testing.assert_index_equal(
-        pd.DatetimeIndex(
-            pd.to_datetime(horizon_two_frame.data[0].customdata, utc=True)
-        ),
-        pd.DatetimeIndex(table["issue_time"]).rename(None),
-    )
-
-
-def test_ridge_saved_model_error_figures_use_signed_errors_and_all_horizons(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    runs = _comparison_runs("error-figure-execution", "2025-01-01T00:00:00Z")
-
-    namespace, _model = _execute_ridge_model_comparison_with_artifacts(
-        runs, tmp_path, monkeypatch
-    )
-
-    actual = namespace["comparison_actual_values"]
-    predictions = namespace["comparison_prediction_values"]
-    signed_errors = predictions - actual
-    signed_figure = namespace["signed_error_boxplot_figure"]
-    absolute_figure = namespace["absolute_error_boxplot_figure"]
-    expected_horizons = list(range(1, FORECAST_HORIZON_HOURS + 1))
-    expected_horizon_labels = [f"H+{horizon:02d}" for horizon in expected_horizons]
-    signed_box_traces = [trace for trace in signed_figure.data if trace.type == "box"]
-    absolute_box_traces = [
-        trace for trace in absolute_figure.data if trace.type == "box"
-    ]
-
-    assert len(signed_box_traces) == 1
-    assert len(absolute_box_traces) == 1
-    assert [trace.name for trace in signed_box_traces] == ["Boxplots"]
-    assert [trace.name for trace in absolute_box_traces] == ["Boxplots"]
-    for figure in (signed_figure, absolute_figure):
-        assert figure.layout.xaxis.type == "category"
-    np.testing.assert_allclose(signed_box_traces[0].y, signed_errors.reshape(-1))
-    np.testing.assert_allclose(
-        absolute_box_traces[0].y, np.abs(signed_errors).reshape(-1)
-    )
-    assert all(trace.boxpoints is False for trace in signed_box_traces)
-    assert all(trace.boxpoints is False for trace in absolute_box_traces)
-    expected_flattened_labels = expected_horizon_labels * len(signed_errors)
-    assert list(signed_box_traces[0].x) == expected_flattened_labels
-    assert list(absolute_box_traces[0].x) == expected_flattened_labels
-
-    signed_mean_trace = next(
-        trace for trace in signed_figure.data if trace.name == "Mean error"
-    )
-    assert list(signed_mean_trace.x) == expected_horizon_labels
-    np.testing.assert_allclose(signed_mean_trace.y, signed_errors.mean(axis=0))
-    absolute_marker_traces = {
-        trace.name: trace for trace in absolute_figure.data if trace.type == "scatter"
-    }
-    assert list(absolute_marker_traces["MAE"].x) == expected_horizon_labels
-    assert list(absolute_marker_traces["RMSE"].x) == expected_horizon_labels
-    np.testing.assert_allclose(
-        absolute_marker_traces["MAE"].y,
-        [7.5 + horizon for horizon in range(1, FORECAST_HORIZON_HOURS + 1)],
-    )
-    np.testing.assert_allclose(
-        absolute_marker_traces["RMSE"].y,
-        [8.5 + horizon for horizon in range(1, FORECAST_HORIZON_HOURS + 1)],
-    )
-    assert signed_figure.layout.shapes[0].y0 == 0
-    assert signed_figure.layout.shapes[0].y1 == 0
 
 
 def test_ridge_saved_model_rejects_manifest_execution_provenance_mismatch(

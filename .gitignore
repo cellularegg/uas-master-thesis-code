@@ -226,3 +226,4 @@ mlflow.db
 .DS_Store
 plans/
 AGENTS.md
+CLAUDE.md

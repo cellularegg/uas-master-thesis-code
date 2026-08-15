@@ -41,29 +41,29 @@ clean-mlflow:
 	rm -f -- mlflow.db; \
 	printf '%s\n' 'MLflow data deleted.'
 
-## Lint using ruff (use `make format` to do formatting)
+## Lint using ruff and mypy (use `make format` to do formatting)
 .PHONY: lint
 lint:
-	ruff format --check
-	ruff check
+	uv run ruff format --check
+	uv run ruff check
+	uv run mypy src tests
 
 ## Format source code with ruff
 .PHONY: format
 format:
-	ruff check --fix
-	ruff format
+	uv run ruff check --fix
+	uv run ruff format
 
 ## Run tests
 .PHONY: test
 test:
 	uv run pytest
 
-## Install git hooks (pre-commit + nbstripout notebook-output filter)
+## Install git hooks (pre-commit + pre-push)
 .PHONY: hooks
 hooks:
 	uv run pre-commit install --install-hooks
 	uv run pre-commit install --hook-type pre-push
-	uv run nbstripout --install --attributes .gitattributes
 
 ## Set up Python interpreter environment
 .PHONY: create_environment
