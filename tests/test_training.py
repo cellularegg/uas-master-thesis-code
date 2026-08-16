@@ -1,5 +1,7 @@
+import hashlib
 import json
 from pathlib import Path
+from typing import NamedTuple, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,13 +14,22 @@ from src.training import (
     JoinedFeatureContract,
     absolute_error_boxplot_payload,
     build_feature_subsets,
+    build_forecast_window_figure,
+    complete_context,
     cv_error_boxplot_payload,
     error_boxplots_figure,
+    forecast_window_layout,
+    forecast_window_prediction_trace,
+    forecast_window_slider_rows,
+    forecast_window_traces,
     load_joined_training_data,
+    mlflow_finite_float,
+    mlflow_run_series,
     numeric_predictors,
     predicted_vs_actual_figure,
     prediction_preview,
     prepare_model_rows,
+    sha256_file,
     summarize_cv_metrics,
     time_series_splits,
     validate_predictions,
@@ -693,3 +704,219 @@ def test_error_boxplots_figure_distinguishes_distribution_and_summary_markers() 
         assert [line.get_marker() for line in marker_lines] == ["D", "X"]
     finally:
         plt.close(figure)
+
+
+def test_sha256_file_hashes_file_contents(tmp_path: Path) -> None:
+    file_path = tmp_path / "data.bin"
+    file_path.write_bytes(b"hello world")
+
+    assert sha256_file(file_path) == hashlib.sha256(b"hello world").hexdigest()
+
+
+def test_mlflow_run_series_returns_column_or_null_series() -> None:
+    runs = pd.DataFrame({"status": ["FINISHED", "RUNNING"]})
+
+    present = mlflow_run_series(runs, "status")
+    missing = mlflow_run_series(runs, "tags.execution_uuid")
+
+    pd.testing.assert_series_equal(present, runs["status"])
+    assert missing.isna().all()
+    assert missing.index.equals(runs.index)
+
+
+def test_mlflow_finite_float_converts_or_returns_none() -> None:
+    assert mlflow_finite_float("1.5") == 1.5
+    assert mlflow_finite_float(2) == 2.0
+    assert mlflow_finite_float(None) is None
+    assert mlflow_finite_float(pd.NA) is None
+    assert mlflow_finite_float(float("nan")) is None
+    assert mlflow_finite_float(float("inf")) is None
+    assert mlflow_finite_float("not-a-number") is None
+
+
+class _ForecastWindowFixture(NamedTuple):
+    prediction_columns: list[str]
+    horizons: list[int]
+    prediction_table: pd.DataFrame
+    water_level_column: str
+    imputed_column: str
+    context_series: pd.DataFrame
+
+
+def _forecast_window_fixture() -> _ForecastWindowFixture:
+    target_columns = ["station-a__target_t_plus_01", "station-a__target_t_plus_02"]
+    prediction_columns = [f"prediction_{column}" for column in target_columns]
+    horizons = [1, 2]
+    issue_times = pd.to_datetime(
+        ["2024-01-01 00:00", "2024-01-01 06:00", "2024-01-03 00:00"], utc=True
+    )
+    prediction_table = pd.DataFrame(
+        {
+            "issue_time": issue_times,
+            "issue_rmse": [1.0, 2.0, 3.0],
+            prediction_columns[0]: [10.0, 20.0, 30.0],
+            prediction_columns[1]: [11.0, 21.0, 31.0],
+        }
+    )
+    water_level_column = "station-a__water_level"
+    imputed_column = "station-a__imputed"
+    context_times = pd.date_range(
+        "2023-12-29 00:00", "2024-01-05 00:00", freq="h", tz="UTC"
+    )
+    context_series = pd.DataFrame(
+        {
+            water_level_column: np.arange(len(context_times), dtype=float),
+            imputed_column: False,
+        },
+        index=context_times,
+    )
+    return _ForecastWindowFixture(
+        prediction_columns=prediction_columns,
+        horizons=horizons,
+        prediction_table=prediction_table,
+        water_level_column=water_level_column,
+        imputed_column=imputed_column,
+        context_series=context_series,
+    )
+
+
+def test_complete_context_requires_full_non_imputed_window() -> None:
+    fixture = _forecast_window_fixture()
+    context_series = fixture.context_series
+    water_level_column = fixture.water_level_column
+    imputed_column = fixture.imputed_column
+    issue_time = pd.Timestamp("2024-01-01", tz="UTC")
+
+    complete = complete_context(
+        issue_time,
+        context_series,
+        water_level_column=water_level_column,
+        imputed_column=imputed_column,
+    )
+    assert complete is not None
+    assert len(complete) == 97
+
+    gap_time = pd.Timestamp("2024-01-01 03:00", tz="UTC")
+    incomplete_series = context_series.drop(gap_time)
+    assert (
+        complete_context(
+            issue_time,
+            incomplete_series,
+            water_level_column=water_level_column,
+            imputed_column=imputed_column,
+        )
+        is None
+    )
+
+    imputed_series = context_series.copy()
+    imputed_series.loc[gap_time, imputed_column] = True
+    assert (
+        complete_context(
+            issue_time,
+            imputed_series,
+            water_level_column=water_level_column,
+            imputed_column=imputed_column,
+        )
+        is None
+    )
+
+
+def test_forecast_window_slider_rows_filters_by_twelve_hour_window() -> None:
+    fixture = _forecast_window_fixture()
+    prediction_table = fixture.prediction_table
+    context_by_row = {0: object(), 1: object(), 2: object()}
+
+    slider_rows = forecast_window_slider_rows(
+        prediction_table.iloc[0], prediction_table, context_by_row
+    )
+
+    assert slider_rows.index.tolist() == [0, 1]
+
+
+def test_forecast_window_prediction_trace_builds_expected_scatter() -> None:
+    fixture = _forecast_window_fixture()
+    prediction_table = fixture.prediction_table
+    window_row = prediction_table.iloc[0]
+
+    trace = forecast_window_prediction_trace(
+        window_row, fixture.prediction_columns, fixture.horizons
+    )
+
+    assert trace.name == "Prediction"
+    assert trace.mode == "lines+markers"
+    assert list(trace.y) == [10.0, 11.0]
+    issue_time = pd.Timestamp(window_row["issue_time"])
+    assert pd.Timestamp(trace.x[0]) == issue_time + pd.to_timedelta(1, unit="h")
+    assert pd.Timestamp(trace.x[1]) == issue_time + pd.to_timedelta(2, unit="h")
+
+
+def test_forecast_window_traces_returns_ground_truth_then_prediction() -> None:
+    fixture = _forecast_window_fixture()
+    prediction_table = fixture.prediction_table
+    window_row = prediction_table.iloc[0]
+    context = complete_context(
+        window_row["issue_time"],
+        fixture.context_series,
+        water_level_column=fixture.water_level_column,
+        imputed_column=fixture.imputed_column,
+    )
+    assert context is not None
+
+    traces = forecast_window_traces(
+        window_row,
+        context,
+        water_level_column=fixture.water_level_column,
+        prediction_columns=fixture.prediction_columns,
+        horizons=fixture.horizons,
+    )
+
+    assert [trace.name for trace in traces] == ["Ground truth", "Prediction"]
+    assert len(traces[0].x) == 97
+
+
+def test_forecast_window_layout_uses_caller_supplied_label() -> None:
+    fixture = _forecast_window_fixture()
+    window_row = fixture.prediction_table.iloc[0]
+
+    layout = forecast_window_layout(window_row, "Best-RMSE Ridge")
+
+    issue_time = window_row["issue_time"]
+    assert layout["title"] == (
+        "Best-RMSE Ridge forecast window<br>"
+        f"Issue time: {issue_time.isoformat()} | "
+        f"24-hour RMSE: {window_row['issue_rmse']:.4f}"
+    )
+    assert layout["margin"] == {"b": 160}
+
+
+def test_build_forecast_window_figure_builds_animated_slider() -> None:
+    fixture = _forecast_window_fixture()
+    prediction_table = fixture.prediction_table
+    context_by_row: dict[int, pd.DataFrame] = {}
+    for row_index, row in prediction_table.iterrows():
+        context = complete_context(
+            row["issue_time"],
+            fixture.context_series,
+            water_level_column=fixture.water_level_column,
+            imputed_column=fixture.imputed_column,
+        )
+        if context is not None:
+            context_by_row[cast(int, row_index)] = context
+    assert set(context_by_row) == {0, 1, 2}
+
+    window_row = prediction_table.iloc[0]
+    figure = build_forecast_window_figure(
+        window_row,
+        context_by_row[0],
+        "Best-RMSE Ridge",
+        prediction_table=prediction_table,
+        context_by_row=context_by_row,
+        water_level_column=fixture.water_level_column,
+        prediction_columns=fixture.prediction_columns,
+        horizons=fixture.horizons,
+    )
+
+    assert len(figure.data) == 2
+    assert len(figure.frames) == 2
+    assert figure.layout.sliders[0].active == 0
+    assert "Best-RMSE Ridge forecast window" in figure.layout.title.text

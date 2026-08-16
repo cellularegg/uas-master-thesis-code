@@ -1,5 +1,6 @@
 """Shared data preparation and evaluation helpers for joined-data models."""
 
+import hashlib
 import json
 import math
 from collections.abc import Sequence
@@ -9,6 +10,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go  # type: ignore[import-untyped]
 from sklearn.model_selection import TimeSeriesSplit  # type: ignore[import-untyped]
 
 
@@ -659,4 +661,314 @@ def error_boxplots_figure(
     axis.grid(axis="y", alpha=0.25)
     figure.suptitle(title)
     figure.tight_layout(rect=(0, 0, 1, 0.94))
+    return figure
+
+
+def sha256_file(path: Path) -> str:
+    """Compute the chunked SHA-256 digest of a file.
+
+    Args:
+        path: File to hash.
+
+    Returns:
+        The hex-encoded SHA-256 digest, used for MLflow provenance params.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def mlflow_run_series(runs: pd.DataFrame, column: str) -> pd.Series:
+    """Return a run column, or a null series when MLflow has no such field.
+
+    Args:
+        runs: MLflow run rows as returned by ``mlflow.search_runs``.
+        column: Column name to read.
+
+    Returns:
+        The requested column, or an all-null object series with the same
+        index when the column is absent.
+    """
+    if column in runs.columns:
+        return runs[column]
+    return pd.Series(pd.NA, index=runs.index, dtype="object")
+
+
+def mlflow_finite_float(value: object) -> float | None:
+    """Convert an MLflow value to a finite float, if possible.
+
+    Args:
+        value: Raw MLflow tag, param, or metric value.
+
+    Returns:
+        The finite float value, or ``None`` if it is missing or not finite.
+    """
+    if value is None or pd.isna(value):  # type: ignore[call-overload]
+        return None
+    try:
+        converted = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return converted if np.isfinite(converted) else None
+
+
+def complete_context(
+    issue_time: pd.Timestamp,
+    context_series: pd.DataFrame,
+    *,
+    water_level_column: str,
+    imputed_column: str,
+) -> pd.DataFrame | None:
+    """Return a complete, non-imputed +/-48-hour context if available.
+
+    Args:
+        issue_time: Forecast issue timestamp to center the context window on.
+        context_series: Timestamp-indexed water-level and imputation frame.
+        water_level_column: Column holding the target station's water level.
+        imputed_column: Column marking imputed target-station rows.
+
+    Returns:
+        The reindexed +/-48-hour context, or ``None`` if any hour is missing
+        or imputed.
+    """
+    issue_time = pd.Timestamp(issue_time)
+    if issue_time.tz is None:
+        issue_time = issue_time.tz_localize("UTC")
+    else:
+        issue_time = issue_time.tz_convert("UTC")
+    expected_times = pd.date_range(
+        issue_time - pd.to_timedelta(48, unit="h"),
+        issue_time + pd.to_timedelta(48, unit="h"),
+        freq="h",
+    )
+    context = context_series.reindex(expected_times)
+    if (
+        len(context) != 97
+        or not context[water_level_column].notna().all()
+        or not context[imputed_column].eq(False).all()
+    ):
+        return None
+    return context
+
+
+def forecast_window_slider_rows(
+    window_row: pd.Series,
+    prediction_table: pd.DataFrame,
+    context_by_row: dict,
+) -> pd.DataFrame:
+    """Return eligible issue times within +/-12 hours of a chart issue.
+
+    Args:
+        window_row: Prediction-table row the chart is centered on.
+        prediction_table: Full per-issue prediction table.
+        context_by_row: Prediction-table indices with a complete context.
+
+    Returns:
+        Prediction-table rows within the +/-12-hour slider window, sorted by
+        issue time.
+    """
+    issue_time = pd.Timestamp(window_row["issue_time"])
+    window_start = issue_time - pd.to_timedelta(12, unit="h")
+    window_end = issue_time + pd.to_timedelta(12, unit="h")
+    return (
+        prediction_table.loc[list(context_by_row)]
+        .loc[lambda rows: rows["issue_time"].between(window_start, window_end)]
+        .sort_values("issue_time", kind="stable")
+    )
+
+
+def forecast_window_prediction_trace(
+    window_row: pd.Series,
+    prediction_columns: Sequence[str],
+    horizons: Sequence[int],
+) -> go.Scatter:
+    """Build the issue-specific direct-forecast prediction trace.
+
+    Args:
+        window_row: Prediction-table row to plot.
+        prediction_columns: Ordered direct-forecast prediction columns.
+        horizons: Ordered forecast horizons, in hours.
+
+    Returns:
+        A Plotly scatter trace of predictions across the forecast horizon.
+    """
+    issue_time = pd.Timestamp(window_row["issue_time"])
+    prediction_times = issue_time + pd.to_timedelta(list(horizons), unit="h")
+    return go.Scatter(
+        x=prediction_times,
+        y=window_row[list(prediction_columns)].to_numpy(dtype=float),
+        mode="lines+markers",
+        name="Prediction",
+        hovertemplate="Valid time=%{x}<br>Prediction=%{y:.3f}<extra></extra>",
+    )
+
+
+def forecast_window_traces(
+    window_row: pd.Series,
+    context: pd.DataFrame,
+    *,
+    water_level_column: str,
+    prediction_columns: Sequence[str],
+    horizons: Sequence[int],
+) -> list[go.Scatter]:
+    """Build ground-truth and direct-forecast prediction traces for one issue.
+
+    Args:
+        window_row: Prediction-table row to plot.
+        context: Complete +/-48-hour ground-truth context for the issue.
+        water_level_column: Column holding the target station's water level.
+        prediction_columns: Ordered direct-forecast prediction columns.
+        horizons: Ordered forecast horizons, in hours.
+
+    Returns:
+        The ground-truth and prediction traces, in that order.
+    """
+    return [
+        go.Scatter(
+            x=context.index,
+            y=context[water_level_column].to_numpy(dtype=float),
+            mode="lines+markers",
+            name="Ground truth",
+            hovertemplate="Valid time=%{x}<br>Ground truth=%{y:.3f}<extra></extra>",
+        ),
+        forecast_window_prediction_trace(window_row, prediction_columns, horizons),
+    ]
+
+
+def forecast_window_layout(window_row: pd.Series, label: str) -> dict:
+    """Build the issue-specific title and marker annotation.
+
+    Args:
+        window_row: Prediction-table row the chart is centered on.
+        label: Complete chart label to prefix the title with.
+
+    Returns:
+        A Plotly layout dict with the issue-time title, marker line, and
+        annotation.
+    """
+    issue_time = pd.Timestamp(window_row["issue_time"])
+    return {
+        "title": (
+            f"{label} forecast window<br>"
+            f"Issue time: {issue_time.isoformat()} | "
+            f"24-hour RMSE: {window_row['issue_rmse']:.4f}"
+        ),
+        "xaxis_title": "Valid time",
+        "yaxis_title": "Water level",
+        "hovermode": "x unified",
+        "margin": {"b": 160},
+        "shapes": [
+            {
+                "type": "line",
+                "x0": issue_time,
+                "x1": issue_time,
+                "y0": 0,
+                "y1": 1,
+                "yref": "paper",
+                "line": {"dash": "dash", "color": "black"},
+            }
+        ],
+        "annotations": [
+            {
+                "x": issue_time,
+                "y": 1,
+                "yref": "paper",
+                "text": "Issue time",
+                "showarrow": True,
+                "arrowhead": 2,
+            }
+        ],
+    }
+
+
+def build_forecast_window_figure(
+    window_row: pd.Series,
+    context: pd.DataFrame,
+    label: str,
+    *,
+    prediction_table: pd.DataFrame,
+    context_by_row: dict,
+    water_level_column: str,
+    prediction_columns: Sequence[str],
+    horizons: Sequence[int],
+) -> go.Figure:
+    """Build an issue-time forecast chart with a +/-12-hour slider.
+
+    The selected issue's ground-truth context remains fixed while the slider
+    updates the prediction trace and issue-time annotations.
+
+    Args:
+        window_row: Prediction-table row the chart is centered on.
+        context: Complete +/-48-hour ground-truth context for the issue.
+        label: Complete chart label to prefix the title with.
+        prediction_table: Full per-issue prediction table.
+        context_by_row: Prediction-table indices with a complete context.
+        water_level_column: Column holding the target station's water level.
+        prediction_columns: Ordered direct-forecast prediction columns.
+        horizons: Ordered forecast horizons, in hours.
+
+    Returns:
+        A Plotly figure with an animated +/-12-hour issue-time slider.
+    """
+    slider_rows = forecast_window_slider_rows(
+        window_row, prediction_table, context_by_row
+    )
+    slider_row_indices = slider_rows.index.tolist()
+    active_slider_index = slider_row_indices.index(window_row.name)
+    frames = []
+    slider_steps = []
+    for row_index, slider_row in slider_rows.iterrows():
+        frame_name = f"forecast-window-{row_index}"
+        frames.append(
+            go.Frame(
+                name=frame_name,
+                data=[
+                    forecast_window_prediction_trace(
+                        slider_row, prediction_columns, horizons
+                    )
+                ],
+                traces=[1],
+                layout=forecast_window_layout(slider_row, label),
+            )
+        )
+        slider_steps.append(
+            {
+                "label": pd.Timestamp(slider_row["issue_time"]).strftime(
+                    "%Y-%m-%d %H:%M UTC"
+                ),
+                "method": "animate",
+                "args": [
+                    [frame_name],
+                    {
+                        "mode": "immediate",
+                        "frame": {"duration": 0, "redraw": True},
+                        "transition": {"duration": 0},
+                    },
+                ],
+            }
+        )
+    figure = go.Figure(
+        data=forecast_window_traces(
+            window_row,
+            context,
+            water_level_column=water_level_column,
+            prediction_columns=prediction_columns,
+            horizons=horizons,
+        ),
+        frames=frames,
+        layout={
+            **forecast_window_layout(window_row, label),
+            "sliders": [
+                {
+                    "active": active_slider_index,
+                    "y": -0.28,
+                    "pad": {"t": 12},
+                    "currentvalue": {"prefix": "Issue time: "},
+                    "steps": slider_steps,
+                }
+            ],
+        },
+    )
     return figure
