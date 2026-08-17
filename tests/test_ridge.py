@@ -8,17 +8,29 @@ import pytest
 
 from src import ridge
 from src.config import FORECAST_HORIZON_HOURS, TARGET_STATION_ID, WEATHER_VARIABLES
+from src.dataset import JoinedDataset, load_joined_dataset
 from src.ridge import (
     load_and_score_saved_model,
     select_candidate,
     select_execution,
     validate_execution,
 )
-from src.training import (
-    build_feature_subsets,
-    load_joined_training_data,
-    prepare_model_rows,
-)
+
+
+def _load_comparison_dataset(
+    metadata_path: Path, train_path: Path, test_path: Path
+) -> JoinedDataset:
+    return load_joined_dataset(
+        metadata_path,
+        train_path,
+        test_path,
+        station_id=TARGET_STATION_ID,
+        forecast_horizon_hours=FORECAST_HORIZON_HOURS,
+        weather_variables=WEATHER_VARIABLES,
+        initial_train_fraction=0.5,
+        n_validation_folds=2,
+        embargo_rows=0,
+    )
 
 
 def test_select_candidate_applies_all_tie_breakers() -> None:
@@ -365,19 +377,10 @@ def test_load_and_score_saved_model_rejects_manifest_execution_provenance_mismat
             manifest_execution_uuid="different-execution",
         )
     )
-    contract, _train_features, test_features = load_joined_training_data(
-        metadata_path,
-        train_path,
-        test_path,
-        station_id=TARGET_STATION_ID,
-        forecast_horizon_hours=FORECAST_HORIZON_HOURS,
-    )
-    feature_subsets = build_feature_subsets(
-        contract, weather_variables=WEATHER_VARIABLES
-    )
-    test_rows = prepare_model_rows(
-        test_features, contract, artifact_name="comparison test"
-    )
+    dataset = _load_comparison_dataset(metadata_path, train_path, test_path)
+    contract = dataset.contract
+    feature_subsets = dataset.feature_subsets
+    test_rows = dataset.test_rows
     selected_candidate = pd.Series({"subset": "lean", "alpha": 0.1})
     monkeypatch.setattr(ridge, "load_joblib", lambda _path: _FakeSavedRidge())
 
@@ -401,19 +404,10 @@ def test_load_and_score_saved_model_scores_matching_manifest(
     metadata_path, train_path, test_path, model_path, manifest_path = (
         _write_comparison_artifacts(tmp_path, execution_uuid="matching-execution")
     )
-    contract, _train_features, test_features = load_joined_training_data(
-        metadata_path,
-        train_path,
-        test_path,
-        station_id=TARGET_STATION_ID,
-        forecast_horizon_hours=FORECAST_HORIZON_HOURS,
-    )
-    feature_subsets = build_feature_subsets(
-        contract, weather_variables=WEATHER_VARIABLES
-    )
-    test_rows = prepare_model_rows(
-        test_features, contract, artifact_name="comparison test"
-    )
+    dataset = _load_comparison_dataset(metadata_path, train_path, test_path)
+    contract = dataset.contract
+    feature_subsets = dataset.feature_subsets
+    test_rows = dataset.test_rows
     selected_candidate = pd.Series({"subset": "lean", "alpha": 0.1})
     fake_model = _FakeSavedRidge()
     monkeypatch.setattr(ridge, "load_joblib", lambda _path: fake_model)

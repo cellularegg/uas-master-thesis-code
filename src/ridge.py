@@ -9,8 +9,8 @@ import pandas as pd
 from joblib import load as load_joblib  # type: ignore[import-untyped]
 
 from src.config import CV_SELECTION_METRIC, FORECAST_HORIZON_HOURS
+from src.dataset import JoinedFeatureContract
 from src.training import (
-    JoinedFeatureContract,
     mlflow_finite_float,
     mlflow_run_series,
     numeric_predictors,
