@@ -11,9 +11,9 @@ import plotly.graph_objects as go  # type: ignore[import-untyped]
 from src.training import validate_predictions
 
 # Hours of ground-truth context shown on either side of a plotted issue time.
-CONTEXT_WINDOW_HOURS = 48
+_CONTEXT_WINDOW_HOURS = 48
 # Hours of neighbouring issue times reachable from a forecast-window slider.
-SLIDER_WINDOW_HOURS = 12
+_SLIDER_WINDOW_HOURS = 12
 
 
 def predicted_vs_actual_figure(
@@ -298,7 +298,7 @@ def forecast_window_figures(
 
     Scores every issue time by the RMSE across all forecast horizons, keeps the
     issue times whose target-station context is complete and non-imputed from
-    ``CONTEXT_WINDOW_HOURS`` before through ``CONTEXT_WINDOW_HOURS`` after, then
+    ``_CONTEXT_WINDOW_HOURS`` before through ``_CONTEXT_WINDOW_HOURS`` after, then
     charts the lowest- and highest-RMSE eligible issue.
 
     Args:
@@ -353,7 +353,7 @@ def forecast_window_figures(
         raise ValueError(
             "Forecast-window plots require at least two issue timestamps with "
             f"complete, non-imputed target-station context from "
-            f"-{CONTEXT_WINDOW_HOURS}h through +{CONTEXT_WINDOW_HOURS}h; "
+            f"-{_CONTEXT_WINDOW_HOURS}h through +{_CONTEXT_WINDOW_HOURS}h; "
             f"found {len(context_by_row)}."
         )
 
@@ -407,13 +407,13 @@ def _complete_context(
     else:
         issue_time = issue_time.tz_convert("UTC")
     expected_times = pd.date_range(
-        issue_time - pd.to_timedelta(CONTEXT_WINDOW_HOURS, unit="h"),
-        issue_time + pd.to_timedelta(CONTEXT_WINDOW_HOURS, unit="h"),
+        issue_time - pd.to_timedelta(_CONTEXT_WINDOW_HOURS, unit="h"),
+        issue_time + pd.to_timedelta(_CONTEXT_WINDOW_HOURS, unit="h"),
         freq="h",
     )
     context = context_series.reindex(expected_times)
     if (
-        len(context) != 2 * CONTEXT_WINDOW_HOURS + 1
+        len(context) != 2 * _CONTEXT_WINDOW_HOURS + 1
         or not context[water_level_column].notna().all()
         or not context[imputed_column].eq(False).all()
     ):
@@ -532,7 +532,7 @@ def _forecast_window_slider_rows(
         Prediction-table rows within the slider window, sorted by issue time.
     """
     issue_time = pd.Timestamp(window_row["issue_time"])
-    slider_span = pd.to_timedelta(SLIDER_WINDOW_HOURS, unit="h")
+    slider_span = pd.to_timedelta(_SLIDER_WINDOW_HOURS, unit="h")
     return (
         prediction_table.loc[list(context_by_row)]
         .loc[

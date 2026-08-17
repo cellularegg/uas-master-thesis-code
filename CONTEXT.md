@@ -85,10 +85,10 @@ times that no cohort qualifies.
 
 ## forecast window
 
-One issue time's 24-hour forecast drawn against the target context series
-±`CONTEXT_WINDOW_HOURS` around it. A window is eligible only when that whole
-span is observed hour by hour with nothing imputed, so a chart never implies
-ground truth that was interpolated. The best and worst eligible windows are
+One issue time's 24-hour forecast drawn against the target context series ±48
+hours around it. A window is eligible only when that whole span is observed
+hour by hour with nothing imputed, so a chart never implies ground truth that
+was interpolated. The best and worst eligible windows are
 chosen by the RMSE across all horizons of that single issue.
 
 `src/plots.py`: `forecast_window_figures()`.
