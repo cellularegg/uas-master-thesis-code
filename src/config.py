@@ -58,6 +58,8 @@ WEATHER_VARIABLES = [
 FORECAST_HORIZON_HOURS = 24
 # Maximum missing water-level gap length eligible for interpolation.
 MAX_INTERPOLATION_GAP_HOURS = 6
+# Minimum raw water level considered valid; values at or below it are missing.
+MIN_VALID_WATER_LEVEL = 0.0
 # Fraction of chronological rows reserved for the sealed test partition.
 TEST_FRACTION = 0.20
 # Minimum target-range overlap required to retain a non-target station.

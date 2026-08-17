@@ -14,6 +14,7 @@ from src.preprocess import (
     filter_station_frames_by_target_range_overlap,
     join_station_frames,
     merge_weather,
+    preprocess_station,
     split_train_test,
     write_joined_preprocess_artifacts,
     write_preprocess_artifacts,
@@ -51,6 +52,92 @@ def test_clean_water_level_interpolates_short_gaps_and_flags_them() -> None:
 
     assert result["water_level"].tolist() == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
     assert result["imputed"].tolist() == [False, True, True, True, False, False]
+
+
+def test_clean_water_level_masks_zero_and_negative_values_before_interpolation() -> (
+    None
+):
+    raw = _raw_water([2.0, 0.0, -1.0, 5.0])
+
+    result = clean_water_level(raw, max_gap_hours=2)
+
+    assert result["water_level"].tolist() == [2.0, 3.0, 4.0, 5.0]
+    assert result["imputed"].tolist() == [False, True, True, False]
+    assert result.index.equals(
+        pd.date_range("2024-01-01", periods=4, freq="h", tz="UTC")
+    )
+
+
+def test_clean_water_level_exact_threshold_is_invalid() -> None:
+    raw = _raw_water([2.0, 1.0, 4.0])
+
+    result = clean_water_level(raw, max_gap_hours=1, min_valid_water_level=1.0)
+
+    assert result["water_level"].tolist() == [2.0, 3.0, 4.0]
+    assert result["imputed"].tolist() == [False, True, False]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [0.0, -1.0, 2.0, 3.0],
+        [2.0, 3.0, 0.0, -1.0],
+        [2.0, 0.0, -1.0, 0.0, -1.0, 3.0],
+    ],
+)
+def test_clean_water_level_leading_trailing_and_long_invalid_gaps_remain_null(
+    values: list[float | None],
+) -> None:
+    result = clean_water_level(_raw_water(values), max_gap_hours=2)
+
+    invalid_positions = [
+        index for index, value in enumerate(values) if value is not None and value <= 0
+    ]
+    assert result.loc[result.index[invalid_positions], "water_level"].isna().all()
+    assert result.loc[result.index[invalid_positions], "imputed"].eq(False).all()
+
+
+@pytest.mark.parametrize("threshold", [True, np.nan, np.inf, -np.inf, "0.0"])
+def test_clean_water_level_rejects_invalid_minimum_threshold(threshold: object) -> None:
+    with pytest.raises((TypeError, ValueError), match="min_valid_water_level"):
+        clean_water_level(
+            _raw_water([1.0, 2.0]),
+            max_gap_hours=1,
+            min_valid_water_level=threshold,  # type: ignore[arg-type]
+        )
+
+
+def test_preprocess_station_preserves_weather_and_hourly_timeline(
+    tmp_path: Path,
+) -> None:
+    station_id = "station-at"
+    timestamps = pd.date_range("2024-01-01", periods=4, freq="h", tz="UTC")
+    _raw_water([2.0, 0.0, -1.0, 5.0]).to_parquet(
+        tmp_path / f"pegelalarm_{station_id}_height_hour.parquet", index=False
+    )
+    weather = pd.DataFrame(
+        {
+            "time": timestamps,
+            "temperature_2m": [10.0, -2.0, 0.0, 12.0],
+            "precipitation": [0.0, 1.5, -0.5, 2.0],
+        }
+    )
+    weather.to_parquet(
+        tmp_path / f"geosphere_inca_{station_id}_hour.parquet", index=False
+    )
+
+    result = preprocess_station(
+        station_id,
+        raw_dir=tmp_path,
+        max_gap_hours=2,
+        weather_variables=["temperature_2m", "precipitation"],
+    )
+
+    assert result["timestamp"].equals(timestamps.to_series(index=result.index))
+    assert result["water_level"].tolist() == [2.0, 3.0, 4.0, 5.0]
+    pd.testing.assert_frame_equal(
+        result[["temperature_2m", "precipitation"]], weather.drop(columns="time")
+    )
 
 
 def test_clean_water_level_leaves_long_gaps_as_nan_and_unflagged() -> None:
@@ -264,6 +351,7 @@ def test_joined_artifacts_can_persist_coverage_metadata(
     )
 
     assert metadata["schema_version"] == "1.1"
+    assert metadata["configuration"]["min_valid_water_level"] == 0.0
     assert metadata["coverage"] == coverage_report
     assert (
         json.loads((tmp_path / "all_stations_preprocess_metadata.json").read_text())[
@@ -359,6 +447,7 @@ def test_write_artifacts_records_hashes_schemas_rows_and_boundaries(
     persisted_test = pd.read_parquet(test_path)
     assert json.loads(metadata_path.read_text()) == metadata
     assert metadata["configuration"]["test_fraction"] == 0.20
+    assert metadata["configuration"]["min_valid_water_level"] == 0.0
     assert metadata["rows"] == {"total": 503, "train": 402, "test": 101}
     assert metadata["artifacts"]["train"]["sha256"] == _sha256(train_path)
     assert metadata["artifacts"]["test"]["sha256"] == _sha256(test_path)
@@ -440,6 +529,7 @@ def test_write_joined_artifacts_records_hashes_schemas_and_rows(
     assert json.loads(metadata_path.read_text()) == metadata
     assert metadata["station_ids"] == ["target-at", "upstream-at"]
     assert metadata["target_station_id"] == "target-at"
+    assert metadata["configuration"]["min_valid_water_level"] == 0.0
     assert metadata["rows"] == {"total": 500, "train": 400, "test": 100}
     assert metadata["artifacts"]["train"]["sha256"] == _sha256(train_path)
     assert metadata["artifacts"]["test"]["sha256"] == _sha256(test_path)

@@ -14,28 +14,52 @@ from typing import Any
 
 import pandas as pd
 
-from src.config import MIN_TARGET_RANGE_OVERLAP, TEST_FRACTION
+from src.config import MIN_TARGET_RANGE_OVERLAP, MIN_VALID_WATER_LEVEL, TEST_FRACTION
 
 
-def clean_water_level(raw: pd.DataFrame, *, max_gap_hours: int) -> pd.DataFrame:
+def _validate_min_valid_water_level(value: object) -> float:
+    """Validate and normalize a minimum water-level threshold."""
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError("min_valid_water_level must be a finite real number")
+    threshold = float(value)
+    if not math.isfinite(threshold):
+        raise ValueError("min_valid_water_level must be a finite real number")
+    return threshold
+
+
+def clean_water_level(
+    raw: pd.DataFrame,
+    *,
+    max_gap_hours: int,
+    min_valid_water_level: float = MIN_VALID_WATER_LEVEL,
+) -> pd.DataFrame:
     """Reindex a station's water-level history to a strict hourly UTC grid.
 
+    Raw values at or below ``min_valid_water_level`` are treated as missing.
     Gaps of at most ``max_gap_hours`` consecutive missing hours are linearly
-    interpolated and flagged via the ``imputed`` column; longer gaps are left
-    as ``NaN`` and not flagged.
+    interpolated and flagged via the ``imputed`` column; longer, leading, and
+    trailing gaps are left as ``NaN`` and not flagged.
 
     Args:
         raw: Raw PegelAlarm history with ``sourceDate``, ``value``, and
             ``station_id`` columns.
         max_gap_hours: Maximum length, in hours, of a gap that gets
             interpolated.
+        min_valid_water_level: Raw values at or below this threshold are
+            treated as missing before gap detection.
 
     Returns:
         DataFrame indexed by hourly UTC ``timestamp`` with ``water_level``,
         ``imputed``, and ``station_id`` columns.
+
+    Raises:
+        TypeError: If ``min_valid_water_level`` is not a real number.
+        ValueError: If ``min_valid_water_level`` is not finite.
     """
+    threshold = _validate_min_valid_water_level(min_valid_water_level)
     station_id = raw["station_id"].iloc[0]
     series = raw.set_index("sourceDate")["value"].sort_index()
+    series = series.where(series > threshold)
     grid = pd.date_range(
         series.index.min(), series.index.max(), freq="h", name="timestamp"
     )
@@ -84,6 +108,7 @@ def preprocess_station(
     raw_dir: Path,
     max_gap_hours: int,
     weather_variables: Sequence[str],
+    min_valid_water_level: float = MIN_VALID_WATER_LEVEL,
 ) -> pd.DataFrame:
     """Load a station's raw parquet files and build its analysis-ready frame.
 
@@ -94,16 +119,26 @@ def preprocess_station(
         max_gap_hours: Maximum length, in hours, of a water-level gap that
             gets interpolated.
         weather_variables: Weather columns to keep.
+        min_valid_water_level: Raw water-level values at or below this
+            threshold are treated as missing before interpolation.
 
     Returns:
         Merged, hourly, analysis-ready DataFrame for the station.
+
+    Raises:
+        TypeError: If ``min_valid_water_level`` is not a real number.
+        ValueError: If ``min_valid_water_level`` is not finite.
     """
     water_raw = pd.read_parquet(
         raw_dir / f"pegelalarm_{station_id}_height_hour.parquet"
     )
     weather_raw = pd.read_parquet(raw_dir / f"geosphere_inca_{station_id}_hour.parquet")
 
-    water = clean_water_level(water_raw, max_gap_hours=max_gap_hours)
+    water = clean_water_level(
+        water_raw,
+        max_gap_hours=max_gap_hours,
+        min_valid_water_level=min_valid_water_level,
+    )
     return merge_weather(water, weather_raw, variables=weather_variables).reset_index()
 
 
@@ -417,6 +452,7 @@ def write_joined_preprocess_artifacts(
     target_station_id: str,
     output_dir: Path,
     test_fraction: float = TEST_FRACTION,
+    min_valid_water_level: float = MIN_VALID_WATER_LEVEL,
     coverage_report: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Write the joined chronological artifacts and their lineage manifest.
@@ -428,6 +464,8 @@ def write_joined_preprocess_artifacts(
         target_station_id: Station whose timeline defines the joined timestamps.
         output_dir: Destination directory for the three artifacts.
         test_fraction: Fraction used to create the supplied partitions.
+        min_valid_water_level: Raw water-level values at or below this
+            threshold were treated as missing before interpolation.
         coverage_report: Optional per-station target-range overlap records from
             :func:`filter_station_frames_by_target_range_overlap`.
 
@@ -435,14 +473,17 @@ def write_joined_preprocess_artifacts(
         The metadata dictionary written to JSON.
 
     Raises:
-        ValueError: If the target's timeline is not contiguous hourly UTC, a
-            station is missing its prefixed ``station_id`` column, or
-            ``target_station_id`` is not in ``station_ids``.
+        TypeError: If ``min_valid_water_level`` is not a real number.
+        ValueError: If ``min_valid_water_level`` is not finite, the target's
+            timeline is not contiguous hourly UTC, a station is missing its
+            prefixed ``station_id`` column, or ``target_station_id`` is not in
+            ``station_ids``.
     """
     if target_station_id not in station_ids:
         raise ValueError(
             f"target station {target_station_id!r} is missing from station_ids"
         )
+    threshold = _validate_min_valid_water_level(min_valid_water_level)
     combined = pd.concat([joined_train, joined_test], ignore_index=True)
     _validate_joined_frame(combined, station_ids=station_ids)
 
@@ -461,6 +502,7 @@ def write_joined_preprocess_artifacts(
         "target_station_id": target_station_id,
         "configuration": {
             "test_fraction": test_fraction,
+            "min_valid_water_level": threshold,
             "min_target_range_overlap": MIN_TARGET_RANGE_OVERLAP,
             "split_rule": "first floor((1-test_fraction)*N) rows are train; the remainder is sealed test data",
         },
@@ -493,6 +535,7 @@ def write_preprocess_artifacts(
     station_id: str,
     output_dir: Path,
     test_fraction: float = TEST_FRACTION,
+    min_valid_water_level: float = MIN_VALID_WATER_LEVEL,
 ) -> dict[str, Any]:
     """Write chronological preprocessing artifacts and their lineage manifest.
 
@@ -502,14 +545,18 @@ def write_preprocess_artifacts(
         station_id: Identifier used in artifact names and metadata.
         output_dir: Destination directory for the three artifacts.
         test_fraction: Fraction used to create the supplied partitions.
+        min_valid_water_level: Raw water-level values at or below this
+            threshold were treated as missing before interpolation.
 
     Returns:
         The metadata dictionary written to JSON.
 
     Raises:
-        ValueError: If the partitions do not reconstruct a valid split for the
-            station and fraction.
+        TypeError: If ``min_valid_water_level`` is not a real number.
+        ValueError: If ``min_valid_water_level`` is not finite or the partitions
+            do not reconstruct a valid split for the station and fraction.
     """
+    threshold = _validate_min_valid_water_level(min_valid_water_level)
     combined = pd.concat([train, test], ignore_index=True)
     expected_train, expected_test = split_train_test(combined, test_fraction)
     if not train.reset_index(drop=True).equals(expected_train):
@@ -533,6 +580,7 @@ def write_preprocess_artifacts(
         "station_id": station_id,
         "configuration": {
             "test_fraction": test_fraction,
+            "min_valid_water_level": threshold,
             "split_rule": "first floor((1-test_fraction)*N) rows are train; the remainder is sealed test data",
         },
         "rows": {
