@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -10,27 +9,11 @@ from src import ridge
 from src.config import FORECAST_HORIZON_HOURS, TARGET_STATION_ID, WEATHER_VARIABLES
 from src.dataset import JoinedDataset, load_joined_dataset
 from src.ridge import (
-    load_and_score_saved_model,
+    load_ridge_manifest,
+    save_ridge_manifest,
+    score_saved_model,
     select_candidate,
-    select_execution,
-    validate_execution,
 )
-
-
-def _load_comparison_dataset(
-    metadata_path: Path, train_path: Path, test_path: Path
-) -> JoinedDataset:
-    return load_joined_dataset(
-        metadata_path,
-        train_path,
-        test_path,
-        station_id=TARGET_STATION_ID,
-        forecast_horizon_hours=FORECAST_HORIZON_HOURS,
-        weather_variables=WEATHER_VARIABLES,
-        initial_train_fraction=0.5,
-        n_validation_folds=2,
-        embargo_rows=0,
-    )
 
 
 def test_select_candidate_applies_all_tie_breakers() -> None:
@@ -136,154 +119,6 @@ def test_select_candidate_applies_all_tie_breakers() -> None:
     assert select_candidate(different_metrics, metric="mae") == ("Low MAE", 0.1)
 
 
-def _comparison_runs(
-    execution_uuid: str,
-    end_time: str,
-    *,
-    selected_subset: str = "lean",
-    selected_alpha: str = "0.1",
-    selected_test_mae: float = 7.5,
-    duplicate_candidate: bool = False,
-    lean_cv_mae: float = 1.0,
-) -> pd.DataFrame:
-    rows = []
-    candidates = [
-        ("lean", "0.1", 2, lean_cv_mae),
-        ("wide", "1.0", 5, lean_cv_mae + 1.0),
-    ]
-    for candidate_number, (subset, alpha, feature_count, cv_mae) in enumerate(
-        candidates, start=1
-    ):
-        rows.append(
-            {
-                "run_id": f"{execution_uuid}-candidate-{candidate_number}",
-                "status": "FINISHED",
-                "end_time": end_time,
-                "tags.run_type": "candidate_parent",
-                "tags.execution_uuid": execution_uuid,
-                "tags.subset": subset,
-                "params.alpha": alpha,
-                "params.feature_count": str(feature_count),
-                "metrics.cv_mae_mean": cv_mae,
-                "metrics.cv_mae_std": 0.1,
-                "metrics.cv_rmse_mean": cv_mae + 0.2,
-                "metrics.cv_rmse_std": 0.2,
-                "metrics.cv_me_mean": 0.1,
-                "metrics.cv_me_std": 0.05,
-                "metrics.cv_r2_mean": 0.5,
-                "metrics.cv_r2_std": 0.1,
-            }
-        )
-    if duplicate_candidate:
-        rows.append(rows[0].copy())
-
-    sealed_test_row = {
-        "run_id": f"{execution_uuid}-sealed-test",
-        "status": "FINISHED",
-        "end_time": end_time,
-        "tags.run_type": "sealed_test",
-        "tags.execution_uuid": execution_uuid,
-        "tags.subset": selected_subset,
-        "params.alpha": selected_alpha,
-        "metrics.test_mae": selected_test_mae,
-        "metrics.test_rmse": selected_test_mae + 1.0,
-        "metrics.test_me": 0.25,
-        "metrics.test_r2": 0.75,
-    }
-    for horizon in range(1, FORECAST_HORIZON_HOURS + 1):
-        sealed_test_row[f"metrics.test_mae_horizon_{horizon:02d}"] = (
-            selected_test_mae + horizon
-        )
-        sealed_test_row[f"metrics.test_rmse_horizon_{horizon:02d}"] = (
-            selected_test_mae + horizon + 1.0
-        )
-        sealed_test_row[f"metrics.test_me_horizon_{horizon:02d}"] = 0.25
-        sealed_test_row[f"metrics.test_r2_horizon_{horizon:02d}"] = 0.75
-    rows.append(sealed_test_row)
-    return pd.DataFrame(rows)
-
-
-def test_select_execution_skips_newer_invalid_execution() -> None:
-    runs = pd.concat(
-        [
-            _comparison_runs(
-                "new-execution",
-                "2025-02-01T00:00:00Z",
-                duplicate_candidate=True,
-            ),
-            _comparison_runs("old-execution", "2025-01-01T00:00:00Z"),
-        ],
-        ignore_index=True,
-    )
-
-    selected_execution = select_execution(runs)
-
-    assert selected_execution["execution_uuid"] == "old-execution"
-    assert len(cast(pd.DataFrame, selected_execution["candidate_table"])) == 2
-
-
-def test_select_execution_reports_missing_mlflow_execution() -> None:
-    with pytest.raises(ValueError, match="Run 04_train_ridge.ipynb"):
-        select_execution(pd.DataFrame())
-
-
-def test_select_execution_uses_cv_for_candidates_and_test_for_selected_only() -> None:
-    runs = _comparison_runs(
-        "valid-execution",
-        "2025-01-01T00:00:00Z",
-        selected_subset="wide",
-        selected_alpha="1.0",
-        selected_test_mae=7.5,
-        lean_cv_mae=1.0,
-    )
-
-    selected_execution = select_execution(runs)
-    candidate_table = cast(pd.DataFrame, selected_execution["candidate_table"])
-    selected_candidate = cast(pd.Series, selected_execution["selected_candidate"])
-    sealed_test_metrics = cast(dict, selected_execution["sealed_test_metrics"])
-
-    assert candidate_table["subset"].tolist() == ["lean", "wide"]
-    assert candidate_table["cv_mae_mean"].tolist() == [1.0, 2.0]
-    assert "test_mae" not in candidate_table.columns
-    assert selected_candidate["subset"] == "wide"
-    assert sealed_test_metrics["test_mae"] == 7.5
-
-
-def test_select_execution_ranks_by_configured_rmse_metric() -> None:
-    runs = _comparison_runs("rmse-ranked-execution", "2025-01-01T00:00:00Z")
-    runs.loc[runs["tags.subset"].eq("lean"), "metrics.cv_rmse_mean"] = 5.0
-    runs.loc[runs["tags.subset"].eq("wide"), "metrics.cv_rmse_mean"] = 1.0
-
-    selected_execution = select_execution(runs)
-    candidate_table = cast(pd.DataFrame, selected_execution["candidate_table"])
-
-    assert candidate_table["subset"].tolist() == ["wide", "lean"]
-
-
-def test_select_execution_skips_legacy_metric_schema() -> None:
-    legacy_runs = _comparison_runs("legacy-execution", "2025-01-01T00:00:00Z")
-    legacy_metric_columns = [
-        column
-        for column in legacy_runs.columns
-        if any(
-            metric in str(column) for metric in ("cv_me", "cv_r2", "test_me", "test_r2")
-        )
-    ]
-    legacy_runs = legacy_runs.drop(columns=legacy_metric_columns)
-
-    with pytest.raises(ValueError, match="No valid Ridge MLflow execution exists"):
-        select_execution(legacy_runs)
-
-
-def test_validate_execution_rejects_sealed_test_without_candidate_match() -> None:
-    runs = _comparison_runs("mismatched-execution", "2025-01-01T00:00:00Z")
-    sealed_test_run = runs.loc[runs["tags.run_type"].eq("sealed_test")].iloc[0].copy()
-    sealed_test_run["tags.subset"] = "unknown-subset"
-
-    with pytest.raises(ValueError, match="does not match a candidate-parent row"):
-        validate_execution(sealed_test_run, runs)
-
-
 class _FakeSavedRidge:
     def __init__(self) -> None:
         self.predictor_values: pd.DataFrame | None = None
@@ -295,16 +130,10 @@ class _FakeSavedRidge:
         return row_numbers * 10.0 + horizon_numbers + 100.0
 
 
-def _write_comparison_artifacts(
-    root: Path,
-    *,
-    execution_uuid: str,
-    manifest_execution_uuid: str | None = None,
-) -> tuple[Path, Path, Path, Path, Path]:
+def _write_feature_artifacts(root: Path) -> JoinedDataset:
+    """Write a synthetic joined artifact triple and load it as a dataset."""
     processed_dir = root / "data" / "processed" / "joined"
     processed_dir.mkdir(parents=True)
-    model_dir = root / "models"
-    model_dir.mkdir()
     station_id = TARGET_STATION_ID
     predictor_columns = [
         f"{station_id}__water_level",
@@ -346,87 +175,244 @@ def _write_comparison_artifacts(
     test_path = processed_dir / "all_stations_test_features.parquet"
     frame.to_parquet(train_path, index=False)
     frame.to_parquet(test_path, index=False)
+    return load_joined_dataset(
+        metadata_path,
+        train_path,
+        test_path,
+        station_id=station_id,
+        forecast_horizon_hours=FORECAST_HORIZON_HOURS,
+        weather_variables=WEATHER_VARIABLES,
+        initial_train_fraction=0.5,
+        n_validation_folds=2,
+        embargo_rows=0,
+    )
 
-    selected_feature_columns = predictor_columns[:2]
-    manifest = {
-        "schema_version": "1.1",
-        "execution_uuid": manifest_execution_uuid or execution_uuid,
-        "station_id": station_id,
-        "forecast_horizon_hours": FORECAST_HORIZON_HOURS,
-        "full_feature_columns": predictor_columns,
-        "selected_subset": "lean",
-        "feature_subset": "lean",
-        "selected_feature_columns": selected_feature_columns,
-        "target_columns": target_columns,
-        "selected_alpha": 0.1,
+
+def _cv_results(selected_subset: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "subset": selected_subset,
+                "feature_count": 2,
+                "alpha": 0.1,
+                "mae_mean": 1.0,
+                "rmse_mean": 1.5,
+            },
+            {
+                "subset": "full",
+                "feature_count": 5,
+                "alpha": 1.0,
+                "mae_mean": 2.0,
+                "rmse_mean": 2.5,
+            },
+        ]
+    )
+
+
+def _per_horizon_metrics(horizons: int = FORECAST_HORIZON_HOURS) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "station_id": TARGET_STATION_ID,
+                "horizon_hours": horizon,
+                "target": f"target_{horizon:02d}",
+                "mae": 1.0 + horizon,
+                "rmse": 2.0 + horizon,
+                "me": 0.25,
+                "r2": 0.75,
+            }
+            for horizon in range(1, horizons + 1)
+        ]
+    )
+
+
+def _save(
+    dataset: JoinedDataset,
+    manifest_path: Path,
+    *,
+    selected_subset: str = "current_water_levels_all_stations",
+    per_horizon_metrics: pd.DataFrame | None = None,
+    sealed_test_metrics: dict[str, float] | None = None,
+) -> None:
+    save_ridge_manifest(
+        manifest_path,
+        model_path=manifest_path.with_suffix(".joblib"),
+        execution_uuid="execution-1",
+        contract=dataset.contract,
+        feature_subsets=dataset.feature_subsets,
+        selected_subset=selected_subset,
+        selected_alpha=0.1,
+        selection_metric="rmse",
+        cv_results=_cv_results(selected_subset),
+        sealed_test_metrics=sealed_test_metrics
+        or {"test_mae": 1.0, "test_rmse": 2.0, "test_me": 0.25, "test_r2": 0.75},
+        per_horizon_metrics=(
+            _per_horizon_metrics()
+            if per_horizon_metrics is None
+            else per_horizon_metrics
+        ),
+        cohort={"train_eligible_rows": len(dataset.train_rows)},
+        training={"source_artifact": "train.parquet"},
+    )
+
+
+def test_ridge_manifest_round_trips_the_selection_and_sealed_test_record(
+    tmp_path: Path,
+) -> None:
+    dataset = _write_feature_artifacts(tmp_path)
+    manifest_path = tmp_path / "ridge.json"
+
+    _save(dataset, manifest_path)
+    manifest = load_ridge_manifest(
+        manifest_path,
+        contract=dataset.contract,
+        feature_subsets=dataset.feature_subsets,
+    )
+
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert stored["schema_version"] == "2.0"
+    assert stored["tie_breaking"][0] == "lowest aggregate CV RMSE"
+    assert manifest.execution_uuid == "execution-1"
+    assert manifest.selected_subset == "current_water_levels_all_stations"
+    assert manifest.selected_alpha == 0.1
+    assert manifest.selection_metric == "rmse"
+    assert manifest.selected_feature_columns == tuple(
+        dataset.feature_subsets["current_water_levels_all_stations"]
+    )
+    assert manifest.target_columns == dataset.contract.target_columns
+    assert manifest.cv_results["subset"].tolist() == [
+        "current_water_levels_all_stations",
+        "full",
+    ]
+    assert manifest.sealed_test_metrics == {
+        "test_mae": 1.0,
+        "test_rmse": 2.0,
+        "test_me": 0.25,
+        "test_r2": 0.75,
     }
-    manifest_path = model_dir / f"ridge_{station_id}.json"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    model_path = model_dir / f"ridge_{station_id}.joblib"
-    model_path.touch()
-    return metadata_path, train_path, test_path, model_path, manifest_path
-
-
-def test_load_and_score_saved_model_rejects_manifest_execution_provenance_mismatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    metadata_path, train_path, test_path, model_path, manifest_path = (
-        _write_comparison_artifacts(
-            tmp_path,
-            execution_uuid="matching-execution",
-            manifest_execution_uuid="different-execution",
-        )
+    assert manifest.horizon_metrics["horizon_hours"].tolist() == list(
+        range(1, FORECAST_HORIZON_HOURS + 1)
     )
-    dataset = _load_comparison_dataset(metadata_path, train_path, test_path)
-    contract = dataset.contract
-    feature_subsets = dataset.feature_subsets
-    test_rows = dataset.test_rows
-    selected_candidate = pd.Series({"subset": "lean", "alpha": 0.1})
-    monkeypatch.setattr(ridge, "load_joblib", lambda _path: _FakeSavedRidge())
+    assert manifest.horizon_metrics["test_mae"].iloc[0] == 2.0
+    assert (
+        manifest.horizon_metrics["test_rmse"].iloc[-1] == 2.0 + FORECAST_HORIZON_HOURS
+    )
 
-    with pytest.raises(ValueError, match="execution_uuid"):
-        load_and_score_saved_model(
-            model_path,
+
+def test_load_ridge_manifest_reports_missing_manifest(tmp_path: Path) -> None:
+    dataset = _write_feature_artifacts(tmp_path)
+
+    with pytest.raises(
+        FileNotFoundError, match="Run 04_train_ridge.ipynb through its sealed-test cell"
+    ):
+        load_ridge_manifest(
+            tmp_path / "absent.json",
+            contract=dataset.contract,
+            feature_subsets=dataset.feature_subsets,
+        )
+
+
+def test_load_ridge_manifest_rejects_an_older_schema_version(tmp_path: Path) -> None:
+    dataset = _write_feature_artifacts(tmp_path)
+    manifest_path = tmp_path / "ridge.json"
+    _save(dataset, manifest_path)
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stored["schema_version"] = "1.1"
+    manifest_path.write_text(json.dumps(stored), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="schema version"):
+        load_ridge_manifest(
             manifest_path,
-            contract,
-            feature_subsets,
-            test_rows,
-            selected_candidate,
-            "matching-execution",
-            forecast_horizon_hours=FORECAST_HORIZON_HOURS,
-            target_station_id=TARGET_STATION_ID,
+            contract=dataset.contract,
+            feature_subsets=dataset.feature_subsets,
         )
 
 
-def test_load_and_score_saved_model_scores_matching_manifest(
+def test_load_ridge_manifest_rejects_contract_mismatches(tmp_path: Path) -> None:
+    dataset = _write_feature_artifacts(tmp_path)
+    manifest_path = tmp_path / "ridge.json"
+    _save(dataset, manifest_path)
+    stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    for field, value, message in (
+        ("station_id", "other-station", "station_id"),
+        ("forecast_horizon_hours", FORECAST_HORIZON_HOURS + 1, "forecast horizon"),
+        ("full_feature_columns", ["only-one"], "full feature contract"),
+        ("target_columns", ["only-one"], "target contract"),
+        ("selected_subset", "unknown-subset", "selected subset"),
+        ("selected_feature_columns", ["only-one"], "selected features"),
+    ):
+        manifest_path.write_text(json.dumps({**stored, field: value}), encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            load_ridge_manifest(
+                manifest_path,
+                contract=dataset.contract,
+                feature_subsets=dataset.feature_subsets,
+            )
+
+
+def test_save_ridge_manifest_rejects_an_incomplete_sealed_test_record(
+    tmp_path: Path,
+) -> None:
+    dataset = _write_feature_artifacts(tmp_path)
+    manifest_path = tmp_path / "ridge.json"
+
+    with pytest.raises(ValueError, match="Sealed-test metrics are missing"):
+        _save(
+            dataset,
+            manifest_path,
+            sealed_test_metrics={"test_mae": 1.0, "test_rmse": 2.0},
+        )
+    with pytest.raises(ValueError, match="non-finite"):
+        _save(
+            dataset,
+            manifest_path,
+            sealed_test_metrics={
+                "test_mae": float("nan"),
+                "test_rmse": 2.0,
+                "test_me": 0.25,
+                "test_r2": 0.75,
+            },
+        )
+    with pytest.raises(ValueError, match="do not match the forecast contract"):
+        _save(
+            dataset,
+            manifest_path,
+            per_horizon_metrics=_per_horizon_metrics(FORECAST_HORIZON_HOURS - 1),
+        )
+    # Nothing is written until every check passes.
+    assert not manifest_path.exists()
+
+
+def test_save_ridge_manifest_rejects_an_unknown_selected_subset(
+    tmp_path: Path,
+) -> None:
+    dataset = _write_feature_artifacts(tmp_path)
+
+    with pytest.raises(ValueError, match="is not a known subset"):
+        _save(dataset, tmp_path / "ridge.json", selected_subset="unknown-subset")
+
+
+def test_score_saved_model_scores_the_cohort_with_the_manifest_features(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    metadata_path, train_path, test_path, model_path, manifest_path = (
-        _write_comparison_artifacts(tmp_path, execution_uuid="matching-execution")
+    dataset = _write_feature_artifacts(tmp_path)
+    manifest_path = tmp_path / "ridge.json"
+    _save(dataset, manifest_path)
+    manifest = load_ridge_manifest(
+        manifest_path,
+        contract=dataset.contract,
+        feature_subsets=dataset.feature_subsets,
     )
-    dataset = _load_comparison_dataset(metadata_path, train_path, test_path)
-    contract = dataset.contract
-    feature_subsets = dataset.feature_subsets
-    test_rows = dataset.test_rows
-    selected_candidate = pd.Series({"subset": "lean", "alpha": 0.1})
     fake_model = _FakeSavedRidge()
     monkeypatch.setattr(ridge, "load_joblib", lambda _path: fake_model)
 
-    predictions = load_and_score_saved_model(
-        model_path,
-        manifest_path,
-        contract,
-        feature_subsets,
-        test_rows,
-        selected_candidate,
-        "matching-execution",
-        forecast_horizon_hours=FORECAST_HORIZON_HOURS,
-        target_station_id=TARGET_STATION_ID,
+    predictions = score_saved_model(
+        manifest, manifest_path.with_suffix(".joblib"), dataset.test_rows
     )
 
-    assert predictions.shape == (len(test_rows), FORECAST_HORIZON_HOURS)
+    assert predictions.shape == (len(dataset.test_rows), FORECAST_HORIZON_HOURS)
     assert fake_model.predictor_values is not None
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert list(fake_model.predictor_values.columns) == list(
-        manifest["selected_feature_columns"]
+        manifest.selected_feature_columns
     )

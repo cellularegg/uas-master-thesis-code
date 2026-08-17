@@ -128,37 +128,3 @@ def prediction_preview(
         index=frame.index,
     )
     return pd.concat([frame[["timestamp", *target_columns]], predicted], axis=1)
-
-
-def mlflow_run_series(runs: pd.DataFrame, column: str) -> pd.Series:
-    """Return a run column, or a null series when MLflow has no such field.
-
-    Args:
-        runs: MLflow run rows as returned by ``mlflow.search_runs``.
-        column: Column name to read.
-
-    Returns:
-        The requested column, or an all-null object series with the same
-        index when the column is absent.
-    """
-    if column in runs.columns:
-        return runs[column]
-    return pd.Series(pd.NA, index=runs.index, dtype="object")
-
-
-def mlflow_finite_float(value: object) -> float | None:
-    """Convert an MLflow value to a finite float, if possible.
-
-    Args:
-        value: Raw MLflow tag, param, or metric value.
-
-    Returns:
-        The finite float value, or ``None`` if it is missing or not finite.
-    """
-    if value is None or pd.isna(value):  # type: ignore[call-overload]
-        return None
-    try:
-        converted = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    return converted if np.isfinite(converted) else None

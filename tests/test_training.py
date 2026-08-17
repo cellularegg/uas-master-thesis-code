@@ -1,8 +1,6 @@
 import pandas as pd
 
 from src.training import (
-    mlflow_finite_float,
-    mlflow_run_series,
     numeric_predictors,
     prediction_preview,
     summarize_cv_metrics,
@@ -118,24 +116,3 @@ def test_prediction_preview_combines_issue_time_actuals_and_predictions() -> Non
         [1.5, 3.5],
         [2.5, 4.5],
     ]
-
-
-def test_mlflow_run_series_returns_column_or_null_series() -> None:
-    runs = pd.DataFrame({"status": ["FINISHED", "RUNNING"]})
-
-    present = mlflow_run_series(runs, "status")
-    missing = mlflow_run_series(runs, "tags.execution_uuid")
-
-    pd.testing.assert_series_equal(present, runs["status"])
-    assert missing.isna().all()
-    assert missing.index.equals(runs.index)
-
-
-def test_mlflow_finite_float_converts_or_returns_none() -> None:
-    assert mlflow_finite_float("1.5") == 1.5
-    assert mlflow_finite_float(2) == 2.0
-    assert mlflow_finite_float(None) is None
-    assert mlflow_finite_float(pd.NA) is None
-    assert mlflow_finite_float(float("nan")) is None
-    assert mlflow_finite_float(float("inf")) is None
-    assert mlflow_finite_float("not-a-number") is None
