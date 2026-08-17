@@ -18,7 +18,7 @@ MANIFEST_SCHEMA_VERSION = "2.0"
 # Aggregate sealed-test metrics every manifest must carry.
 SEALED_TEST_METRIC_NAMES = ("test_mae", "test_rmse", "test_me", "test_r2")
 MANIFEST_GUIDANCE = (
-    "Run 04_train_ridge.ipynb through its sealed-test cell to write one."
+    "Run 04_02_train_ridge.ipynb through its sealed-test cell to write one."
 )
 
 

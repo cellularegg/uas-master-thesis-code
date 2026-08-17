@@ -227,3 +227,5 @@ mlflow.db
 plans/
 AGENTS.md
 CLAUDE.md
+
+archive/

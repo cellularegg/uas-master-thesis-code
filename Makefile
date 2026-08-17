@@ -91,26 +91,16 @@ features: data
 ## Train the persistence baseline
 .PHONY: train-persistence
 train-persistence: features
-	uv run jupyter execute --inplace 04_train_persistence.ipynb
+	uv run jupyter execute --inplace 04_01_train_persistence.ipynb
 
 ## Train the Ridge regression model
 .PHONY: train-ridge
 train-ridge: features
-	uv run jupyter execute --inplace 04_train_ridge.ipynb
-
-## Train the MLP regression model
-.PHONY: train-mlp
-train-mlp: features
-	uv run jupyter execute --inplace 04_train_mlp.ipynb
-
-## Train the XGBoost regression model
-.PHONY: train-xgboost
-train-xgboost: features
-	uv run jupyter execute --inplace 04_train_xgboost.ipynb
+	uv run jupyter execute --inplace 04_02_train_ridge.ipynb
 
 ## Train all models
 .PHONY: train
-train: train-persistence train-ridge train-mlp train-xgboost
+train: train-persistence train-ridge
 
 ## Evaluate trained models (assumes `make train` has already been run)
 .PHONY: evaluate

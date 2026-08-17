@@ -303,7 +303,8 @@ def test_load_ridge_manifest_reports_missing_manifest(tmp_path: Path) -> None:
     dataset = _write_feature_artifacts(tmp_path)
 
     with pytest.raises(
-        FileNotFoundError, match="Run 04_train_ridge.ipynb through its sealed-test cell"
+        FileNotFoundError,
+        match="Run 04_02_train_ridge.ipynb through its sealed-test cell",
     ):
         load_ridge_manifest(
             tmp_path / "absent.json",
