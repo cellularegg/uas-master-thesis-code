@@ -45,6 +45,8 @@ INITIAL_TRAIN_FRACTION = 0.50
 EMBARGO_HOURS = 24
 # Aggregate CV metric used to select the best Ridge alpha.
 CV_SELECTION_METRIC = "rmse"
+# Fixed seed for every stochastic estimator fit (e.g. MLPRegressor folds and retrain).
+RANDOM_STATE = 51912309
 
 # INCA weather dataset identifier used for weather feature retrieval.
 INCA_DATASET_ID = "inca-v1-1h-1km"

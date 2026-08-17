@@ -4,38 +4,41 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.linear_model import Ridge  # type: ignore[import-untyped]
-from sklearn.pipeline import Pipeline  # type: ignore[import-untyped]
+from sklearn.compose import TransformedTargetRegressor  # type: ignore[import-untyped]
 from sklearn.preprocessing import StandardScaler  # type: ignore[import-untyped]
 
-from src import ridge
+from src import mlp
 from src.config import FORECAST_HORIZON_HOURS, TARGET_STATION_ID, WEATHER_VARIABLES
 from src.dataset import JoinedDataset, load_joined_dataset
-from src.ridge import (
-    build_ridge_estimator,
-    load_ridge_manifest,
-    save_ridge_manifest,
+from src.mlp import (
+    build_mlp_estimator,
+    format_hidden_layer_sizes,
+    load_mlp_manifest,
+    parse_hidden_layer_sizes,
+    save_mlp_manifest,
     score_saved_model,
     select_candidate,
 )
 
 
-def test_select_candidate_returns_ridge_triple_with_ridges_exact_tie_break_set() -> (
-    None
-):
-    """Regression test: the shared model_selection tie-break ordering/columns
-    generically is covered by tests/test_model_selection.py. This confirms only
-    that Ridge's wrapper still returns the (subset, alpha, log1p) triple using
-    Ridge's exact tie-break columns (feature_count, log1p, alpha, subset).
-    """
-    assert select_candidate(
+def test_format_and_parse_hidden_layer_sizes_round_trip() -> None:
+    assert format_hidden_layer_sizes((64, 32)) == "64x32"
+    assert format_hidden_layer_sizes((128,)) == "128"
+    assert parse_hidden_layer_sizes("64x32") == (64, 32)
+    assert parse_hidden_layer_sizes("128") == (128,)
+    for sizes in ((32,), (64,), (128,), (64, 32)):
+        assert parse_hidden_layer_sizes(format_hidden_layer_sizes(sizes)) == sizes
+
+
+def test_select_candidate_ranks_by_metric_then_ties() -> None:
+    winner = select_candidate(
         pd.DataFrame(
             [
                 {
                     "subset": "Wide",
                     "alpha": 0.1,
                     "feature_count": 10,
-                    "log1p": False,
+                    "hidden_layer_sizes": "128",
                     "mae_mean": 2.0,
                     "rmse_mean": 2.0,
                 },
@@ -43,41 +46,17 @@ def test_select_candidate_returns_ridge_triple_with_ridges_exact_tie_break_set()
                     "subset": "Lean",
                     "alpha": 0.1,
                     "feature_count": 2,
-                    "log1p": False,
+                    "hidden_layer_sizes": "32",
                     "mae_mean": 1.0,
                     "rmse_mean": 1.0,
                 },
             ]
         )
-    ) == ("Lean", 0.1, False)
+    )
+    assert winner == ("Lean", (32,), 0.1)
 
 
-def test_select_candidate_prefers_log1p_false_on_tie() -> None:
-    assert select_candidate(
-        pd.DataFrame(
-            [
-                {
-                    "subset": "Same",
-                    "alpha": 10.0,
-                    "feature_count": 2,
-                    "log1p": False,
-                    "mae_mean": 1.0,
-                    "rmse_mean": 1.0,
-                },
-                {
-                    "subset": "Same",
-                    "alpha": 0.01,
-                    "feature_count": 2,
-                    "log1p": True,
-                    "mae_mean": 1.0,
-                    "rmse_mean": 1.0,
-                },
-            ]
-        )
-    ) == ("Same", 10.0, False)
-
-
-class _FakeSavedRidge:
+class _FakeSavedMlp:
     def __init__(self) -> None:
         self.predictor_values: pd.DataFrame | None = None
 
@@ -152,16 +131,16 @@ def _cv_results(selected_subset: str) -> pd.DataFrame:
             {
                 "subset": selected_subset,
                 "feature_count": 2,
-                "alpha": 0.1,
-                "log1p": False,
+                "alpha": 0.001,
+                "hidden_layer_sizes": "32",
                 "mae_mean": 1.0,
                 "rmse_mean": 1.5,
             },
             {
                 "subset": "full",
                 "feature_count": 5,
-                "alpha": 1.0,
-                "log1p": False,
+                "alpha": 0.01,
+                "hidden_layer_sizes": "64x32",
                 "mae_mean": 2.0,
                 "rmse_mean": 2.5,
             },
@@ -191,19 +170,18 @@ def _save(
     manifest_path: Path,
     *,
     selected_subset: str = "current_water_levels_all_stations",
-    selected_log1p: bool = False,
     per_horizon_metrics: pd.DataFrame | None = None,
     sealed_test_metrics: dict[str, float] | None = None,
 ) -> None:
-    save_ridge_manifest(
+    save_mlp_manifest(
         manifest_path,
         model_path=manifest_path.with_suffix(".joblib"),
         execution_uuid="execution-1",
         contract=dataset.contract,
         feature_subsets=dataset.feature_subsets,
         selected_subset=selected_subset,
-        selected_alpha=0.1,
-        selected_log1p=selected_log1p,
+        selected_hidden_layer_sizes=(32,),
+        selected_alpha=0.001,
         selection_metric="rmse",
         cv_results=_cv_results(selected_subset),
         sealed_test_metrics=sealed_test_metrics
@@ -218,29 +196,27 @@ def _save(
     )
 
 
-def test_ridge_manifest_round_trips_the_selection_and_sealed_test_record(
+def test_mlp_manifest_round_trips_the_selection_and_sealed_test_record(
     tmp_path: Path,
 ) -> None:
     dataset = _write_feature_artifacts(tmp_path)
-    manifest_path = tmp_path / "ridge.json"
+    manifest_path = tmp_path / "mlp.json"
 
     _save(dataset, manifest_path)
-    manifest = load_ridge_manifest(
+    manifest = load_mlp_manifest(
         manifest_path,
         contract=dataset.contract,
         feature_subsets=dataset.feature_subsets,
     )
 
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert stored["schema_version"] == "3.0"
-    assert stored["tie_breaking"][0] == "lowest aggregate CV RMSE"
-    assert stored["tie_breaking"][2] == "log1p=False preferred"
-    assert stored["selected_log1p"] is False
-    assert all(isinstance(record["log1p"], bool) for record in stored["cv_results"])
+    assert stored["schema_version"] == "1.0"
+    assert "log1p" not in json.dumps(stored)
+    assert stored["selected_hidden_layer_sizes"] == [32]
     assert manifest.execution_uuid == "execution-1"
     assert manifest.selected_subset == "current_water_levels_all_stations"
-    assert manifest.selected_alpha == 0.1
-    assert manifest.selected_log1p is False
+    assert manifest.selected_hidden_layer_sizes == (32,)
+    assert manifest.selected_alpha == 0.001
     assert manifest.selection_metric == "rmse"
     assert manifest.selected_feature_columns == tuple(
         dataset.feature_subsets["current_water_levels_all_stations"]
@@ -265,39 +241,39 @@ def test_ridge_manifest_round_trips_the_selection_and_sealed_test_record(
     )
 
 
-def test_load_ridge_manifest_reports_missing_manifest(tmp_path: Path) -> None:
+def test_load_mlp_manifest_reports_missing_manifest(tmp_path: Path) -> None:
     dataset = _write_feature_artifacts(tmp_path)
 
     with pytest.raises(
         FileNotFoundError,
-        match="Run 04_02_train_ridge.ipynb through its sealed-test cell",
+        match="Run 04_03_train_mlp.ipynb through its sealed-test cell",
     ):
-        load_ridge_manifest(
+        load_mlp_manifest(
             tmp_path / "absent.json",
             contract=dataset.contract,
             feature_subsets=dataset.feature_subsets,
         )
 
 
-def test_load_ridge_manifest_rejects_an_older_schema_version(tmp_path: Path) -> None:
+def test_load_mlp_manifest_rejects_an_older_schema_version(tmp_path: Path) -> None:
     dataset = _write_feature_artifacts(tmp_path)
-    manifest_path = tmp_path / "ridge.json"
+    manifest_path = tmp_path / "mlp.json"
     _save(dataset, manifest_path)
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    stored["schema_version"] = "2.0"
+    stored["schema_version"] = "0.9"
     manifest_path.write_text(json.dumps(stored), encoding="utf-8")
 
     with pytest.raises(ValueError, match="schema version"):
-        load_ridge_manifest(
+        load_mlp_manifest(
             manifest_path,
             contract=dataset.contract,
             feature_subsets=dataset.feature_subsets,
         )
 
 
-def test_load_ridge_manifest_rejects_contract_mismatches(tmp_path: Path) -> None:
+def test_load_mlp_manifest_rejects_contract_mismatches(tmp_path: Path) -> None:
     dataset = _write_feature_artifacts(tmp_path)
-    manifest_path = tmp_path / "ridge.json"
+    manifest_path = tmp_path / "mlp.json"
     _save(dataset, manifest_path)
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
 
@@ -311,18 +287,18 @@ def test_load_ridge_manifest_rejects_contract_mismatches(tmp_path: Path) -> None
     ):
         manifest_path.write_text(json.dumps({**stored, field: value}), encoding="utf-8")
         with pytest.raises(ValueError, match=message):
-            load_ridge_manifest(
+            load_mlp_manifest(
                 manifest_path,
                 contract=dataset.contract,
                 feature_subsets=dataset.feature_subsets,
             )
 
 
-def test_save_ridge_manifest_rejects_an_incomplete_sealed_test_record(
+def test_save_mlp_manifest_rejects_an_incomplete_sealed_test_record(
     tmp_path: Path,
 ) -> None:
     dataset = _write_feature_artifacts(tmp_path)
-    manifest_path = tmp_path / "ridge.json"
+    manifest_path = tmp_path / "mlp.json"
 
     with pytest.raises(ValueError, match="Sealed-test metrics are missing"):
         _save(
@@ -351,28 +327,26 @@ def test_save_ridge_manifest_rejects_an_incomplete_sealed_test_record(
     assert not manifest_path.exists()
 
 
-def test_save_ridge_manifest_rejects_an_unknown_selected_subset(
-    tmp_path: Path,
-) -> None:
+def test_save_mlp_manifest_rejects_an_unknown_selected_subset(tmp_path: Path) -> None:
     dataset = _write_feature_artifacts(tmp_path)
 
     with pytest.raises(ValueError, match="is not a known subset"):
-        _save(dataset, tmp_path / "ridge.json", selected_subset="unknown-subset")
+        _save(dataset, tmp_path / "mlp.json", selected_subset="unknown-subset")
 
 
 def test_score_saved_model_scores_the_cohort_with_the_manifest_features(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dataset = _write_feature_artifacts(tmp_path)
-    manifest_path = tmp_path / "ridge.json"
+    manifest_path = tmp_path / "mlp.json"
     _save(dataset, manifest_path)
-    manifest = load_ridge_manifest(
+    manifest = load_mlp_manifest(
         manifest_path,
         contract=dataset.contract,
         feature_subsets=dataset.feature_subsets,
     )
-    fake_model = _FakeSavedRidge()
-    monkeypatch.setattr(ridge, "load_joblib", lambda _path: fake_model)
+    fake_model = _FakeSavedMlp()
+    monkeypatch.setattr(mlp, "load_joblib", lambda _path: fake_model)
 
     predictions = score_saved_model(
         manifest, manifest_path.with_suffix(".joblib"), dataset.test_rows
@@ -396,7 +370,7 @@ def _synthetic_predictors(rows: int = 60) -> pd.DataFrame:
     )
 
 
-def test_build_ridge_estimator_log1p_round_trips_to_raw_scale() -> None:
+def test_build_mlp_estimator_is_a_transformed_target_regressor_with_scaling() -> None:
     predictors = _synthetic_predictors()
     targets = pd.DataFrame(
         {
@@ -406,42 +380,44 @@ def test_build_ridge_estimator_log1p_round_trips_to_raw_scale() -> None:
     )
     feature_columns = list(predictors.columns)
 
-    estimator = build_ridge_estimator(feature_columns, alpha=1.0, log1p=True)
+    estimator = build_mlp_estimator(
+        feature_columns,
+        hidden_layer_sizes=(4,),
+        alpha=0.01,
+        max_iter=25,
+    )
     estimator.fit(predictors, targets)
+
+    assert isinstance(estimator, TransformedTargetRegressor)
+    assert isinstance(estimator.transformer_, StandardScaler)
     predictions = estimator.predict(predictors)
 
     assert predictions.shape == (len(predictors), 2)
     assert np.isfinite(predictions).all()
 
 
-def test_build_ridge_estimator_log1p_tolerates_negative_ineligible_columns() -> None:
-    predictors = _synthetic_predictors()
-    predictors["station-at__water_level_change_24h"] = np.linspace(
-        -20.0, -1.0, len(predictors)
-    )
-    targets = pd.DataFrame({"target_1": predictors["station-at__water_level"] + 5.0})
-    feature_columns = list(predictors.columns)
-
-    estimator = build_ridge_estimator(feature_columns, alpha=1.0, log1p=True)
-    estimator.fit(predictors, targets)
-    predictions = estimator.predict(predictors)
-
-    assert np.isfinite(predictions).all()
-
-
-def test_build_ridge_estimator_without_log1p_matches_hand_built_pipeline() -> None:
+def test_build_mlp_estimator_is_reproducible_with_a_fixed_random_state() -> None:
     predictors = _synthetic_predictors()
     targets = pd.DataFrame(
         {"target_1": 2.0 * predictors["station-at__water_level"] + 1.0}
     )
     feature_columns = list(predictors.columns)
 
-    estimator = build_ridge_estimator(feature_columns, alpha=1.0, log1p=False)
-    estimator.fit(predictors, targets)
-    predictions = estimator.predict(predictors)
+    first = build_mlp_estimator(
+        feature_columns,
+        hidden_layer_sizes=(4,),
+        alpha=0.01,
+        max_iter=25,
+        random_state=7,
+    )
+    first.fit(predictors, targets)
+    second = build_mlp_estimator(
+        feature_columns,
+        hidden_layer_sizes=(4,),
+        alpha=0.01,
+        max_iter=25,
+        random_state=7,
+    )
+    second.fit(predictors, targets)
 
-    reference = Pipeline([("scaler", StandardScaler()), ("ridge", Ridge(alpha=1.0))])
-    reference.fit(predictors[feature_columns], targets)
-    reference_predictions = reference.predict(predictors[feature_columns])
-
-    np.testing.assert_allclose(predictions, reference_predictions)
+    np.testing.assert_allclose(first.predict(predictors), second.predict(predictors))
