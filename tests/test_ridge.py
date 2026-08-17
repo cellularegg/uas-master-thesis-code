@@ -4,11 +4,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.linear_model import Ridge  # type: ignore[import-untyped]
+from sklearn.pipeline import Pipeline  # type: ignore[import-untyped]
+from sklearn.preprocessing import StandardScaler  # type: ignore[import-untyped]
 
 from src import ridge
 from src.config import FORECAST_HORIZON_HOURS, TARGET_STATION_ID, WEATHER_VARIABLES
 from src.dataset import JoinedDataset, load_joined_dataset
 from src.ridge import (
+    build_ridge_estimator,
     load_ridge_manifest,
     save_ridge_manifest,
     score_saved_model,
@@ -24,6 +28,7 @@ def test_select_candidate_applies_all_tie_breakers() -> None:
                     "subset": "Wide",
                     "alpha": 0.1,
                     "feature_count": 10,
+                    "log1p": False,
                     "mae_mean": 2.0,
                     "rmse_mean": 2.0,
                 },
@@ -31,12 +36,13 @@ def test_select_candidate_applies_all_tie_breakers() -> None:
                     "subset": "Lean",
                     "alpha": 0.1,
                     "feature_count": 2,
+                    "log1p": False,
                     "mae_mean": 1.0,
                     "rmse_mean": 1.0,
                 },
             ]
         )
-    ) == ("Lean", 0.1)
+    ) == ("Lean", 0.1, False)
     assert select_candidate(
         pd.DataFrame(
             [
@@ -44,6 +50,7 @@ def test_select_candidate_applies_all_tie_breakers() -> None:
                     "subset": "Wide",
                     "alpha": 0.01,
                     "feature_count": 10,
+                    "log1p": False,
                     "mae_mean": 1.0,
                     "rmse_mean": 1.0,
                 },
@@ -51,12 +58,13 @@ def test_select_candidate_applies_all_tie_breakers() -> None:
                     "subset": "Lean",
                     "alpha": 0.1,
                     "feature_count": 2,
+                    "log1p": False,
                     "mae_mean": 1.0,
                     "rmse_mean": 1.0,
                 },
             ]
         )
-    ) == ("Lean", 0.1)
+    ) == ("Lean", 0.1, False)
     assert select_candidate(
         pd.DataFrame(
             [
@@ -64,6 +72,7 @@ def test_select_candidate_applies_all_tie_breakers() -> None:
                     "subset": "Same",
                     "alpha": 1.0,
                     "feature_count": 2,
+                    "log1p": False,
                     "mae_mean": 1.0,
                     "rmse_mean": 1.0,
                 },
@@ -71,12 +80,13 @@ def test_select_candidate_applies_all_tie_breakers() -> None:
                     "subset": "Same",
                     "alpha": 0.1,
                     "feature_count": 2,
+                    "log1p": False,
                     "mae_mean": 1.0,
                     "rmse_mean": 1.0,
                 },
             ]
         )
-    ) == ("Same", 0.1)
+    ) == ("Same", 0.1, False)
     assert select_candidate(
         pd.DataFrame(
             [
@@ -84,6 +94,7 @@ def test_select_candidate_applies_all_tie_breakers() -> None:
                     "subset": "Zulu",
                     "alpha": 0.1,
                     "feature_count": 2,
+                    "log1p": False,
                     "mae_mean": 1.0,
                     "rmse_mean": 1.0,
                 },
@@ -91,18 +102,20 @@ def test_select_candidate_applies_all_tie_breakers() -> None:
                     "subset": "Alpha",
                     "alpha": 0.1,
                     "feature_count": 2,
+                    "log1p": False,
                     "mae_mean": 1.0,
                     "rmse_mean": 1.0,
                 },
             ]
         )
-    ) == ("Alpha", 0.1)
+    ) == ("Alpha", 0.1, False)
     different_metrics = pd.DataFrame(
         [
             {
                 "subset": "Low MAE",
                 "alpha": 0.1,
                 "feature_count": 2,
+                "log1p": False,
                 "mae_mean": 1.0,
                 "rmse_mean": 4.0,
             },
@@ -110,13 +123,39 @@ def test_select_candidate_applies_all_tie_breakers() -> None:
                 "subset": "Low RMSE",
                 "alpha": 0.1,
                 "feature_count": 2,
+                "log1p": False,
                 "mae_mean": 2.0,
                 "rmse_mean": 1.0,
             },
         ]
     )
-    assert select_candidate(different_metrics) == ("Low RMSE", 0.1)
-    assert select_candidate(different_metrics, metric="mae") == ("Low MAE", 0.1)
+    assert select_candidate(different_metrics) == ("Low RMSE", 0.1, False)
+    assert select_candidate(different_metrics, metric="mae") == ("Low MAE", 0.1, False)
+
+
+def test_select_candidate_prefers_log1p_false_on_tie() -> None:
+    assert select_candidate(
+        pd.DataFrame(
+            [
+                {
+                    "subset": "Same",
+                    "alpha": 10.0,
+                    "feature_count": 2,
+                    "log1p": False,
+                    "mae_mean": 1.0,
+                    "rmse_mean": 1.0,
+                },
+                {
+                    "subset": "Same",
+                    "alpha": 0.01,
+                    "feature_count": 2,
+                    "log1p": True,
+                    "mae_mean": 1.0,
+                    "rmse_mean": 1.0,
+                },
+            ]
+        )
+    ) == ("Same", 10.0, False)
 
 
 class _FakeSavedRidge:
@@ -195,6 +234,7 @@ def _cv_results(selected_subset: str) -> pd.DataFrame:
                 "subset": selected_subset,
                 "feature_count": 2,
                 "alpha": 0.1,
+                "log1p": False,
                 "mae_mean": 1.0,
                 "rmse_mean": 1.5,
             },
@@ -202,6 +242,7 @@ def _cv_results(selected_subset: str) -> pd.DataFrame:
                 "subset": "full",
                 "feature_count": 5,
                 "alpha": 1.0,
+                "log1p": False,
                 "mae_mean": 2.0,
                 "rmse_mean": 2.5,
             },
@@ -231,6 +272,7 @@ def _save(
     manifest_path: Path,
     *,
     selected_subset: str = "current_water_levels_all_stations",
+    selected_log1p: bool = False,
     per_horizon_metrics: pd.DataFrame | None = None,
     sealed_test_metrics: dict[str, float] | None = None,
 ) -> None:
@@ -242,6 +284,7 @@ def _save(
         feature_subsets=dataset.feature_subsets,
         selected_subset=selected_subset,
         selected_alpha=0.1,
+        selected_log1p=selected_log1p,
         selection_metric="rmse",
         cv_results=_cv_results(selected_subset),
         sealed_test_metrics=sealed_test_metrics
@@ -270,11 +313,15 @@ def test_ridge_manifest_round_trips_the_selection_and_sealed_test_record(
     )
 
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert stored["schema_version"] == "2.0"
+    assert stored["schema_version"] == "3.0"
     assert stored["tie_breaking"][0] == "lowest aggregate CV RMSE"
+    assert stored["tie_breaking"][2] == "log1p=False preferred"
+    assert stored["selected_log1p"] is False
+    assert all(isinstance(record["log1p"], bool) for record in stored["cv_results"])
     assert manifest.execution_uuid == "execution-1"
     assert manifest.selected_subset == "current_water_levels_all_stations"
     assert manifest.selected_alpha == 0.1
+    assert manifest.selected_log1p is False
     assert manifest.selection_metric == "rmse"
     assert manifest.selected_feature_columns == tuple(
         dataset.feature_subsets["current_water_levels_all_stations"]
@@ -318,7 +365,7 @@ def test_load_ridge_manifest_rejects_an_older_schema_version(tmp_path: Path) -> 
     manifest_path = tmp_path / "ridge.json"
     _save(dataset, manifest_path)
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    stored["schema_version"] = "1.1"
+    stored["schema_version"] = "2.0"
     manifest_path.write_text(json.dumps(stored), encoding="utf-8")
 
     with pytest.raises(ValueError, match="schema version"):
@@ -417,3 +464,65 @@ def test_score_saved_model_scores_the_cohort_with_the_manifest_features(
     assert list(fake_model.predictor_values.columns) == list(
         manifest.selected_feature_columns
     )
+
+
+def _synthetic_predictors(rows: int = 60) -> pd.DataFrame:
+    rng = np.random.default_rng(0)
+    return pd.DataFrame(
+        {
+            "station-at__water_level": rng.uniform(1.0, 50.0, rows),
+            "station-at__water_level_change_24h": rng.uniform(-5.0, 5.0, rows),
+            "station-at__temperature_2m": rng.uniform(-10.0, 30.0, rows),
+        }
+    )
+
+
+def test_build_ridge_estimator_log1p_round_trips_to_raw_scale() -> None:
+    predictors = _synthetic_predictors()
+    targets = pd.DataFrame(
+        {
+            "target_1": 2.0 * predictors["station-at__water_level"] + 1.0,
+            "target_2": 3.0 * predictors["station-at__water_level"] + 2.0,
+        }
+    )
+    feature_columns = list(predictors.columns)
+
+    estimator = build_ridge_estimator(feature_columns, alpha=1.0, log1p=True)
+    estimator.fit(predictors, targets)
+    predictions = estimator.predict(predictors)
+
+    assert predictions.shape == (len(predictors), 2)
+    assert np.isfinite(predictions).all()
+
+
+def test_build_ridge_estimator_log1p_tolerates_negative_ineligible_columns() -> None:
+    predictors = _synthetic_predictors()
+    predictors["station-at__water_level_change_24h"] = np.linspace(
+        -20.0, -1.0, len(predictors)
+    )
+    targets = pd.DataFrame({"target_1": predictors["station-at__water_level"] + 5.0})
+    feature_columns = list(predictors.columns)
+
+    estimator = build_ridge_estimator(feature_columns, alpha=1.0, log1p=True)
+    estimator.fit(predictors, targets)
+    predictions = estimator.predict(predictors)
+
+    assert np.isfinite(predictions).all()
+
+
+def test_build_ridge_estimator_without_log1p_matches_hand_built_pipeline() -> None:
+    predictors = _synthetic_predictors()
+    targets = pd.DataFrame(
+        {"target_1": 2.0 * predictors["station-at__water_level"] + 1.0}
+    )
+    feature_columns = list(predictors.columns)
+
+    estimator = build_ridge_estimator(feature_columns, alpha=1.0, log1p=False)
+    estimator.fit(predictors, targets)
+    predictions = estimator.predict(predictors)
+
+    reference = Pipeline([("scaler", StandardScaler()), ("ridge", Ridge(alpha=1.0))])
+    reference.fit(predictors[feature_columns], targets)
+    reference_predictions = reference.predict(predictors[feature_columns])
+
+    np.testing.assert_allclose(predictions, reference_predictions)

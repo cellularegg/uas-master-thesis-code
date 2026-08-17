@@ -17,6 +17,8 @@ from src.feature_engineering import (
     calculate_target_eligibility,
     extract_station_frame,
     feature_column_names,
+    is_log1p_eligible_base_name,
+    log1p_eligible_columns,
     target_column_names,
     write_feature_artifacts,
     write_joined_feature_artifacts,
@@ -500,3 +502,49 @@ def test_write_joined_feature_artifacts_rejects_changed_source_columns(
             test_source_path=test_source_path,
             output_dir=tmp_path / "output",
         )
+
+
+def test_is_log1p_eligible_base_name_matches_expected_water_level_columns() -> None:
+    predictors = feature_column_names()
+    expected_eligible = {
+        name
+        for name in predictors
+        if name == "water_level"
+        or name.startswith(
+            (
+                "water_level_lag_",
+                "water_level_rolling_mean_",
+                "water_level_rolling_min_",
+                "water_level_rolling_max_",
+            )
+        )
+    }
+    for name in predictors:
+        assert is_log1p_eligible_base_name(name) == (name in expected_eligible)
+
+    excluded = set(predictors) - expected_eligible
+    assert "water_level_change_24h" in excluded
+    assert "water_level_rolling_std_24h" in excluded
+    assert "imputed" in excluded
+    assert "water_level" in expected_eligible
+    assert "water_level_lag_1h" in expected_eligible
+    assert "water_level_rolling_mean_6h" in expected_eligible
+    assert "water_level_rolling_min_24h" in expected_eligible
+    assert "water_level_rolling_max_168h" in expected_eligible
+
+
+def test_log1p_eligible_columns_strips_station_prefix_and_preserves_order() -> None:
+    columns = [
+        "station-a__imputed",
+        "station-a__water_level_change_24h",
+        "station-a__water_level",
+        "station-b__water_level_lag_3h",
+        "station-a__water_level_rolling_std_6h",
+        "water_level_rolling_mean_6h",
+    ]
+
+    assert log1p_eligible_columns(columns) == [
+        "station-a__water_level",
+        "station-b__water_level_lag_3h",
+        "water_level_rolling_mean_6h",
+    ]

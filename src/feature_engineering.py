@@ -25,6 +25,14 @@ WATER_LEVEL_CHANGE_HOURS = (1, 3, 6, 12, 24)
 PRECIPITATION_VARIABLES = ("precipitation",)
 TEMPERATURE_VARIABLE = "temperature_2m"
 
+LOG1P_ELIGIBLE_BASE_NAMES: frozenset[str] = frozenset({"water_level"})
+LOG1P_ELIGIBLE_BASE_PREFIXES: tuple[str, ...] = (
+    "water_level_lag_",
+    "water_level_rolling_mean_",
+    "water_level_rolling_min_",
+    "water_level_rolling_max_",
+)
+
 
 @dataclass(frozen=True)
 class FeatureConfig:
@@ -104,6 +112,45 @@ def target_column_names(
         f"target_t_plus_{offset:0{width}d}"
         for offset in range(1, config.horizon_hours + 1)
     )
+
+
+def is_log1p_eligible_base_name(base_name: str) -> bool:
+    """Report whether a predictor base name is a strictly positive water level.
+
+    Eligible: ``water_level`` and its ``lag``/rolling ``mean``/``min``/``max``
+    derivatives, all of which stay a raw gauge-relative level (`>0` when the
+    source observation is eligible). Excluded: ``water_level_change_*h``
+    (a difference, can be negative or zero) and
+    ``water_level_rolling_std_*h`` (a dispersion measure, not a level).
+
+    Args:
+        base_name: Unprefixed predictor or target name.
+
+    Returns:
+        True if a log1p transform is safe to apply to this column.
+    """
+    return base_name in LOG1P_ELIGIBLE_BASE_NAMES or base_name.startswith(
+        LOG1P_ELIGIBLE_BASE_PREFIXES
+    )
+
+
+def log1p_eligible_columns(columns: Sequence[str]) -> list[str]:
+    """Select the log1p-eligible water-level columns from a joined predictor list.
+
+    Args:
+        columns: Predictor columns, optionally prefixed as
+            ``"{station_id}__{base_name}"`` following the joined dataset's
+            column naming convention.
+
+    Returns:
+        The subset of ``columns`` whose base name is log1p-eligible, in
+        input order.
+    """
+    return [
+        column
+        for column in columns
+        if is_log1p_eligible_base_name(column.partition("__")[2] or column)
+    ]
 
 
 def calculate_target_eligibility(
