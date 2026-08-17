@@ -1,5 +1,6 @@
 """Evaluation figures for joined-data forecast models."""
 
+import locale
 import math
 from collections.abc import Sequence
 
@@ -8,7 +9,14 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go  # type: ignore[import-untyped]
 
+from src.config import MATPLOTLIB_STYLE
 from src.training import validate_predictions
+
+plt.style.use(MATPLOTLIB_STYLE)
+# Group thousands in axis tick labels: matplotlib only does this through the
+# numeric locale, so pin one rather than inherit the ambient (grouping-less) C.
+locale.setlocale(locale.LC_NUMERIC, "en_US.UTF-8")
+plt.rcParams["axes.formatter.use_locale"] = True
 
 # Hours of ground-truth context shown on either side of a plotted issue time.
 _CONTEXT_WINDOW_HOURS = 48
@@ -589,7 +597,7 @@ def _forecast_window_layout(window_row: pd.Series, label: str) -> dict:
             f"24-hour RMSE: {window_row['issue_rmse']:.4f}"
         ),
         "xaxis_title": "Valid time",
-        "yaxis_title": "Water level",
+        "yaxis": {"title": "Water level", "separatethousands": True},
         "hovermode": "x unified",
         "margin": {"b": 160},
         "shapes": [

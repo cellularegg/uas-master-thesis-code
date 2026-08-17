@@ -1,6 +1,7 @@
 """Project configuration loaded from environment variables and constants."""
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -61,3 +62,10 @@ MAX_INTERPOLATION_GAP_HOURS = 6
 TEST_FRACTION = 0.20
 # Minimum target-range overlap required to retain a non-target station.
 MIN_TARGET_RANGE_OVERLAP = 0.90
+
+# Matplotlib style supplying the figure colour palette (colour-vision-friendly).
+MATPLOTLIB_STYLE = "petroff10"
+# Root of the sibling LaTeX thesis repository that consumes exported artifacts.
+THESIS_DIR = Path(__file__).resolve().parent.parent.parent / "uas-master-thesis"
+# Body text width of the thesis document, in inches (twbook: 456.25555pt).
+THESIS_TEXTWIDTH_IN = 456.25555 / 72.27
