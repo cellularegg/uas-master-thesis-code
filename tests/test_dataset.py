@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from src.config import TARGET_STATION_ID
-from src.dataset import JoinedFeatureContract, load_joined_dataset
+from src.dataset import JoinedFeatureContract, load_joined_dataset, time_series_splits
 from src.feature_engineering import feature_column_names
 
 WEATHER_VARIABLES = ("precipitation", "temperature_2m")
@@ -385,6 +385,28 @@ def test_load_joined_dataset_rejects_empty_feature_subset(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="target_station_full.*empty"):
         _load(paths)
+
+
+def test_time_series_splits_builds_expanding_folds_with_an_embargo() -> None:
+    folds, validation_test_size = time_series_splits(
+        20, initial_train_fraction=0.5, n_validation_folds=2, embargo_rows=2
+    )
+
+    assert validation_test_size == 4
+    assert [
+        (train_indices.tolist(), validation_indices.tolist())
+        for train_indices, validation_indices in folds
+    ] == [
+        (list(range(10)), list(range(12, 16))),
+        (list(range(14)), list(range(16, 20))),
+    ]
+
+
+def test_time_series_splits_rejects_too_few_rows_for_the_cv_policy() -> None:
+    with pytest.raises(ValueError, match="Not enough eligible training rows"):
+        time_series_splits(
+            6, initial_train_fraction=0.5, n_validation_folds=2, embargo_rows=2
+        )
 
 
 def test_load_joined_dataset_requires_target_station_context_columns(

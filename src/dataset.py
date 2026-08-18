@@ -103,7 +103,7 @@ def load_joined_dataset(
     )
     train_rows = _prepare_model_rows(train_features, contract, artifact_name="train")
     test_rows = _prepare_model_rows(test_features, contract, artifact_name="test")
-    folds, validation_test_size = _time_series_splits(
+    folds, validation_test_size = time_series_splits(
         len(train_rows),
         initial_train_fraction=initial_train_fraction,
         n_validation_folds=n_validation_folds,
@@ -327,7 +327,7 @@ def _build_feature_subsets(
     return subsets
 
 
-def _time_series_splits(
+def time_series_splits(
     n_rows: int,
     *,
     initial_train_fraction: float,

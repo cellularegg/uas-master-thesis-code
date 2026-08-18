@@ -118,9 +118,14 @@ train-random-forest: features
 train-extra-trees: features
 	uv run jupyter execute --inplace 04_06_train_extra_trees.ipynb
 
+## Train the RNN (LSTM/GRU) model
+.PHONY: train-rnn
+train-rnn: features
+	uv run jupyter execute --inplace 04_07_train_rnn.ipynb
+
 ## Train all models
 .PHONY: train
-train: train-persistence train-ridge train-mlp train-xgboost train-random-forest train-extra-trees
+train: train-persistence train-ridge train-mlp train-xgboost train-random-forest train-extra-trees train-rnn
 
 ## Evaluate trained models (assumes `make train` has already been run)
 .PHONY: evaluate
