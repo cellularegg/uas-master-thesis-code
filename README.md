@@ -34,20 +34,25 @@ training, while `make model_selection` re-runs evaluation first.
 | 3 | `03_feature_engineering.ipynb` | `make features` (runs 01 + 02 + 03) | `data/processed/` |
 | 4 | `04_01_train_persistence.ipynb` | `make train-persistence` | in-notebook metrics and MLflow run hierarchy |
 | 4 | `04_02_train_ridge.ipynb` | `make train-ridge` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
-| — | (both of the above) | `make train` | — |
+| 4 | `04_03_train_mlp.ipynb` | `make train-mlp` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
+| 4 | `04_04_train_xgboost.ipynb` | `make train-xgboost` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
+| 4 | `04_05_train_random_forest.ipynb` | `make train-random-forest` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
+| 4 | `04_06_train_extra_trees.ipynb` | `make train-extra-trees` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
+| — | (all six stage-4 models) | `make train` | — |
 | 5 | `05_evaluate.ipynb` | `make evaluate` | comparison plots/tables |
 | 6 | `06_model_selection.ipynb` | `make model_selection` (runs 05 + 06) | selected model/run |
 
-`04_01_train_persistence.ipynb` and `04_02_train_ridge.ipynb` share stage number 4:
-they're parallel model candidates, not sequential steps. Additional stage-4
-experiments are retained in `archive/` and are not part of the active Make
-pipeline. `make evaluate` and `make model_selection` assume `make train` has
-already been run. If you're starting from scratch, run the full pipeline top to
-bottom with `make data features train evaluate model_selection`.
+All six `04_*_train_*.ipynb` notebooks share stage number 4: they are parallel
+model candidates, not sequential steps. They use the same joined cohort and
+validation folds; Ridge, MLP, XGBoost, Random Forest, and Extra Trees also
+write a selected model and manifest to `models/`. `make evaluate` and
+`make model_selection` assume `make train` has already been run. If you're
+starting from scratch, run
+the full pipeline top to bottom with `make data features train evaluate model_selection`.
 
 The active stage-4 notebooks display prediction previews and aggregate/per-horizon
-metrics. They log candidate and sealed-test runs to MLflow; the Ridge notebook
-also writes the selected model and its manifest to `models/`.
+metrics. They log candidate and sealed-test runs to MLflow; the fitted-model
+training notebooks persist a manifest as the durable execution record.
 
 ## Weather source
 

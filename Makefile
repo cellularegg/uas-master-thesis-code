@@ -103,9 +103,24 @@ train-ridge: features
 train-mlp: features
 	uv run jupyter execute --inplace 04_03_train_mlp.ipynb
 
+## Train the XGBoost model
+.PHONY: train-xgboost
+train-xgboost: features
+	uv run jupyter execute --inplace 04_04_train_xgboost.ipynb
+
+## Train the Random Forest model
+.PHONY: train-random-forest
+train-random-forest: features
+	uv run jupyter execute --inplace 04_05_train_random_forest.ipynb
+
+## Train the Extra Trees model
+.PHONY: train-extra-trees
+train-extra-trees: features
+	uv run jupyter execute --inplace 04_06_train_extra_trees.ipynb
+
 ## Train all models
 .PHONY: train
-train: train-persistence train-ridge train-mlp
+train: train-persistence train-ridge train-mlp train-xgboost train-random-forest train-extra-trees
 
 ## Evaluate trained models (assumes `make train` has already been run)
 .PHONY: evaluate

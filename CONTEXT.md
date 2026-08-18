@@ -48,12 +48,14 @@ drops.
 ## candidate
 
 One `(ablation subset, hyperparameter)` pair, evaluated across every validation
-fold. Ridge's search is 6 subsets × 5 alphas = 30 candidates. A candidate is
-*selected* by the configured `CV_SELECTION_METRIC` with explicit tie-breaking
-(fewer features, then smaller alpha, then subset name) — never by anything the
-sealed test reported.
+fold. Ridge's search is 6 subsets × 5 alphas = 30 candidates; MLP, XGBoost,
+Random Forest, and Extra Trees use their notebook-defined candidate spaces and
+reuse each sampled set across all six subsets. A candidate is *selected* by
+the configured `CV_SELECTION_METRIC` with explicit estimator-specific
+tie-breaking — never by anything the sealed test reported.
 
-`src/ridge.py`: `select_candidate()`, `tie_breaking_policy()`.
+`src/ridge.py`, `src/mlp.py`, `src/xgboost_model.py`, `src/random_forest.py`,
+and `src/extra_trees.py` own the candidate-selection policies.
 
 ## execution
 
@@ -66,13 +68,15 @@ it leaves no manifest.
 ## manifest
 
 The durable record of one execution, written once, after the sealed test has
-been scored: `models/ridge_{station}.json`, `schema_version: "2.0"`. It carries
-the feature contract, the selected subset and alpha, the full candidate table,
-and the aggregate and per-horizon sealed-test metrics. It is what a notebook's
-evaluation half reads back — MLflow is the run log and the UI, not the record.
+been scored. Ridge, MLP, XGBoost, Random Forest, and Extra Trees write a
+model-specific JSON manifest (schema `1.0` for the latter four) carrying the
+feature contract, selected candidate, full CV table, and aggregate/per-horizon
+sealed-test metrics. It is what a notebook's evaluation half reads back —
+MLflow is the run log and UI, not the record.
 
-`src/ridge.py`: `save_ridge_manifest()`, `load_ridge_manifest()`,
-`RidgeManifest`.
+`src/ridge.py`, `src/mlp.py`, `src/xgboost_model.py`, `src/random_forest.py`,
+and `src/extra_trees.py` expose model-specific save/load helpers and manifest
+types.
 
 ## target context series
 
