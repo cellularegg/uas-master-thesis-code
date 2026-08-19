@@ -1,5 +1,8 @@
 minimum_pre_commit_version: "4.6.1"
 
+default_language_version:
+  python: python3.12
+
 repos:
   - repo: local
     hooks:

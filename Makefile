@@ -125,7 +125,8 @@ train-rnn: features
 
 ## Train all models
 .PHONY: train
-train: train-persistence train-ridge train-mlp train-xgboost train-random-forest train-extra-trees train-rnn
+train: train-persistence train-ridge train-mlp train-xgboost train-extra-trees train-rnn
+# train: train-persistence train-ridge train-mlp train-xgboost train-random-forest train-extra-trees train-rnn
 
 ## Evaluate trained models (assumes `make train` has already been run)
 .PHONY: evaluate
