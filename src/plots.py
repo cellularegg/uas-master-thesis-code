@@ -42,6 +42,8 @@ _COMPARISON_METRIC_TITLES = {
 }
 _REGIME_METRIC_TITLES = {"mae": "MAE", "rmse": "RMSE", "me": "ME"}
 _QUARTILE_REGIME_LABELS = ("Q1", "Q2", "Q3", "Q4")
+type RegimeGroup = Literal["quartile", "alarm"]
+type RegimeMetric = Literal["mae", "rmse", "me"]
 _COMPARISON_MODEL_COLORS = (
     "#636EFA",
     "#EF553B",
@@ -750,6 +752,206 @@ def quartile_horizon_comparison_figure(
     return quartile_horizon_small_multiples_figure(comparison_metrics, metric=metric)
 
 
+def regime_aggregate_figure(
+    aggregate_metrics: pd.DataFrame,
+    *,
+    regime_group: RegimeGroup,
+    model_label: str,
+) -> go.Figure:
+    """Plot aggregate sealed-test errors for one model and regime group.
+
+    The input is the wide aggregate table returned by
+    :func:`src.metrics.water_level_regime_tables`, rather than the tidy
+    cross-model table used by the evaluation notebook.  The other regime group
+    may remain in the frame; it is ignored after the requested labels are
+    selected.
+
+    Args:
+        aggregate_metrics: Aggregate regime metrics with ``regime``,
+            ``scored_values``, ``mae``, ``rmse``, and ``me`` columns.
+        regime_group: ``"quartile"`` for Q1--Q4 or ``"alarm"`` for Alarm.
+        model_label: Human-readable model name used in the figure title.
+
+    Returns:
+        A three-panel Plotly figure for MAE, RMSE, and ME.
+
+    Raises:
+        ValueError: If the group, model label, or metric table is invalid.
+    """
+    _validate_model_label(model_label)
+    rows = _validated_direct_regime_rows(
+        aggregate_metrics, regime_group=regime_group, scope="aggregate"
+    )
+    regimes = _regime_group_labels(regime_group)
+    figure = make_subplots(
+        rows=1,
+        cols=3,
+        subplot_titles=list(_REGIME_METRIC_TITLES.values()),
+        shared_xaxes=regime_group == "alarm",
+    )
+    for column, metric in enumerate(_REGIME_METRIC_TITLES, start=1):
+        metric_rows = rows.set_index("regime").loc[list(regimes)].reset_index()
+        values = metric_rows[metric].to_numpy(dtype=float)
+        customdata = np.column_stack(
+            [
+                metric_rows["regime"].astype(str).to_numpy(),
+                metric_rows["scored_values"].to_numpy(dtype=int),
+            ]
+        )
+        if regime_group == "alarm":
+            x_values = [model_label]
+            mode = "markers"
+        else:
+            x_values = metric_rows["regime"].astype(str).tolist()
+            mode = "lines+markers"
+        figure.add_trace(
+            go.Scatter(
+                x=x_values,
+                y=values,
+                mode=mode,
+                name=model_label,
+                line={"color": _COMPARISON_MODEL_COLORS[0]},
+                marker={"color": _COMPARISON_MODEL_COLORS[0], "size": 9},
+                customdata=customdata,
+                connectgaps=False,
+                hovertemplate=(
+                    f"Model={model_label}<br>"
+                    "Regime=%{customdata[0]}<br>"
+                    "Scored values=%{customdata[1]}<br>"
+                    "Value=%{y:.3f}<extra>"
+                    f"{_REGIME_METRIC_TITLES[metric]}</extra>"
+                ),
+            ),
+            row=1,
+            col=column,
+        )
+        figure.update_yaxes(title_text="Metric value", row=1, col=column)
+        if metric == "me":
+            _add_zero_reference_line(figure, row=1, col=column)
+        figure.update_xaxes(
+            categoryorder="array",
+            categoryarray=([model_label] if regime_group == "alarm" else regimes),
+            tickangle=-20,
+            row=1,
+            col=column,
+        )
+    definition_label = (
+        "Q1–Q4 water-level regimes"
+        if regime_group == "quartile"
+        else "Alarm-level (actual ≥ configured threshold)"
+    )
+    figure.update_layout(
+        title=f"{model_label} sealed-test regime diagnostics — {definition_label}, aggregate",
+        template="plotly_white",
+        height=450,
+        hovermode="closest",
+    )
+    return figure
+
+
+def regime_horizon_figure(
+    horizon_metrics: pd.DataFrame,
+    *,
+    regime_group: RegimeGroup,
+    metric: RegimeMetric = "mae",
+    model_label: str,
+) -> go.Figure:
+    """Plot one sealed-test error metric across forecast horizons.
+
+    Quartile diagnostics use a 2x2 small-multiple layout, while the alarm
+    diagnostic uses one separate horizon plot.  Empty cohorts retain their
+    rows and therefore appear as gaps in the traces.
+
+    Args:
+        horizon_metrics: Per-horizon regime metrics with ``regime``,
+            ``horizon_hours``, ``scored_values``, ``mae``, ``rmse``, and ``me``
+            columns.
+        regime_group: ``"quartile"`` for Q1--Q4 or ``"alarm"`` for Alarm.
+        metric: Metric to plot: ``"mae"``, ``"rmse"``, or ``"me"``.
+        model_label: Human-readable model name used in the figure title.
+
+    Returns:
+        A Plotly horizon figure for the selected regime group and metric.
+
+    Raises:
+        ValueError: If the group, metric, model label, or metric table is
+            invalid.
+    """
+    _validate_model_label(model_label)
+    if metric not in _REGIME_METRIC_TITLES:
+        raise ValueError(f"Unknown regime metric: {metric!r}")
+    rows = _validated_direct_regime_rows(
+        horizon_metrics, regime_group=regime_group, scope="horizon"
+    )
+    regimes = _regime_group_labels(regime_group)
+    metric_rows = rows.loc[rows["regime"].isin(regimes)].copy()
+    if regime_group == "quartile":
+        figure = make_subplots(
+            rows=2,
+            cols=2,
+            subplot_titles=list(regimes),
+            shared_xaxes=True,
+            shared_yaxes=True,
+        )
+        for index, regime in enumerate(regimes):
+            row_number = index // 2 + 1
+            column_number = index % 2 + 1
+            regime_rows = metric_rows.loc[metric_rows["regime"].eq(regime)]
+            _add_regime_horizon_trace(
+                figure,
+                regime_rows,
+                metric=metric,
+                model_label=model_label,
+                row=row_number,
+                column=column_number,
+                showlegend=index == 0,
+            )
+            figure.update_xaxes(
+                dtick=1,
+                title_text="Horizon (hours)",
+                row=row_number,
+                col=column_number,
+            )
+            figure.update_yaxes(
+                title_text=_REGIME_METRIC_TITLES[metric],
+                row=row_number,
+                col=column_number,
+            )
+            if metric == "me":
+                _add_zero_reference_line(figure, row=row_number, col=column_number)
+        figure.update_layout(
+            title=(
+                f"{model_label} sealed-test {metric.upper()} by horizon — "
+                "Q1–Q4 small multiples"
+            ),
+            template="plotly_white",
+            height=700,
+            hovermode="x unified",
+        )
+        return figure
+
+    figure = go.Figure()
+    alarm_rows = metric_rows.loc[metric_rows["regime"].eq("Alarm")]
+    _add_regime_horizon_trace(
+        figure,
+        alarm_rows,
+        metric=metric,
+        model_label=model_label,
+        showlegend=True,
+    )
+    if metric == "me":
+        _add_zero_reference_line(figure)
+    figure.update_layout(
+        title=f"{model_label} sealed-test alarm-level {metric.upper()} by horizon",
+        xaxis_title="Forecast horizon (hours)",
+        yaxis_title=_REGIME_METRIC_TITLES[metric],
+        template="plotly_white",
+        hovermode="x unified",
+    )
+    figure.update_xaxes(dtick=1)
+    return figure
+
+
 def feature_subset_best_comparison_figure(
     feature_subset_metrics: pd.DataFrame,
     comparison_metrics: pd.DataFrame,
@@ -1194,6 +1396,160 @@ def _comparison_model_color_map(models: Sequence[str]) -> dict[str, str]:
         model: _COMPARISON_MODEL_COLORS[index % len(_COMPARISON_MODEL_COLORS)]
         for index, model in enumerate(models)
     }
+
+
+def _validate_model_label(model_label: str) -> None:
+    """Validate a model label used in a direct regime diagnostic."""
+    if not isinstance(model_label, str) or not model_label.strip():
+        raise ValueError("model_label must be a non-empty string")
+
+
+def _add_zero_reference_line(
+    figure: go.Figure,
+    *,
+    row: int | None = None,
+    col: int | None = None,
+) -> None:
+    """Add the shared zero reference line to a metric figure."""
+    line = {"color": "black", "dash": "dash", "width": 1}
+    if row is None and col is None:
+        figure.add_hline(y=0.0, line=line)
+        return
+    if row is None or col is None:
+        raise ValueError("row and col must be provided together")
+    figure.add_hline(y=0.0, line=line, row=row, col=col)
+
+
+def _regime_group_labels(regime_group: RegimeGroup) -> tuple[str, ...]:
+    """Return the required regime labels for one direct diagnostic group."""
+    if regime_group == "quartile":
+        return _QUARTILE_REGIME_LABELS
+    if regime_group == "alarm":
+        return ("Alarm",)
+    raise ValueError(f"Unknown regime group: {regime_group!r}")
+
+
+def _direct_regime_numeric_values(
+    rows: pd.DataFrame,
+    column: str,
+) -> np.ndarray:
+    """Convert one direct regime-table column to a float array."""
+    try:
+        numeric = pd.to_numeric(rows[column], errors="raise")
+        return numeric.to_numpy(dtype=float, na_value=np.nan)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"Regime column {column!r} must contain numbers") from error
+
+
+def _validated_direct_regime_rows(
+    regime_metrics: pd.DataFrame,
+    *,
+    regime_group: RegimeGroup,
+    scope: Literal["aggregate", "horizon"],
+) -> pd.DataFrame:
+    """Validate and canonicalize one wide per-model regime table."""
+    regimes = _regime_group_labels(regime_group)
+    required_columns = {"regime", "scored_values", *_REGIME_METRIC_TITLES}
+    if scope == "horizon":
+        required_columns.add("horizon_hours")
+    missing_columns = sorted(required_columns.difference(regime_metrics.columns))
+    if missing_columns:
+        raise ValueError(f"Regime metrics are missing columns: {missing_columns}")
+
+    rows = regime_metrics.loc[regime_metrics["regime"].isin(regimes)].copy()
+    observed_regimes = set(rows["regime"].dropna().astype(str))
+    missing_regimes = [regime for regime in regimes if regime not in observed_regimes]
+    if missing_regimes:
+        raise ValueError(f"Regime metrics are missing regimes: {missing_regimes}")
+
+    duplicate_columns = ["regime"]
+    if scope == "horizon":
+        duplicate_columns.append("horizon_hours")
+    if rows.duplicated(duplicate_columns).any():
+        raise ValueError(
+            "Regime metrics contain duplicate rows for " + "/".join(duplicate_columns)
+        )
+
+    counts = _direct_regime_numeric_values(rows, "scored_values")
+    if not np.isfinite(counts).all() or (counts < 0).any() or (counts % 1 != 0).any():
+        raise ValueError("Regime scored-value counts must be non-negative integers")
+    rows["scored_values"] = counts.astype(np.int64)
+
+    for metric in _REGIME_METRIC_TITLES:
+        values = _direct_regime_numeric_values(rows, metric)
+        if np.isinf(values).any() or (np.isnan(values) & (counts != 0)).any():
+            raise ValueError(
+                f"Regime {metric.upper()} values must be finite when scored_values > 0"
+            )
+        rows[metric] = values
+
+    if scope == "aggregate":
+        if "horizon_hours" in rows:
+            horizons = _direct_regime_numeric_values(rows, "horizon_hours")
+            if np.isfinite(horizons).any():
+                raise ValueError("Aggregate regime rows must have null horizons")
+        return rows
+
+    horizons = _direct_regime_numeric_values(rows, "horizon_hours")
+    if (
+        not np.isfinite(horizons).all()
+        or (horizons < 1).any()
+        or (horizons % 1 != 0).any()
+    ):
+        raise ValueError("Regime horizon values must be positive integers")
+    rows["horizon_hours"] = horizons.astype(np.int64)
+    expected_horizons = list(range(1, int(horizons.max()) + 1))
+    observed_horizons = sorted(set(rows["horizon_hours"].tolist()))
+    if observed_horizons != expected_horizons:
+        raise ValueError("Regime horizon values must form a contiguous sequence")
+    for regime in regimes:
+        regime_horizons = rows.loc[rows["regime"].eq(regime), "horizon_hours"].tolist()
+        if regime_horizons != expected_horizons:
+            raise ValueError(
+                f"Regime {regime} rows are not in complete forecast-horizon order"
+            )
+    return rows
+
+
+def _add_regime_horizon_trace(
+    figure: go.Figure,
+    rows: pd.DataFrame,
+    *,
+    metric: RegimeMetric,
+    model_label: str,
+    showlegend: bool,
+    row: int | None = None,
+    column: int | None = None,
+) -> None:
+    """Add one validated regime/horizon trace to a Plotly figure."""
+    rows = rows.sort_values("horizon_hours", kind="stable")
+    customdata = np.column_stack(
+        [
+            rows["regime"].astype(str).to_numpy(),
+            rows["scored_values"].to_numpy(dtype=int),
+        ]
+    )
+    trace = go.Scatter(
+        x=rows["horizon_hours"].to_numpy(dtype=int),
+        y=rows[metric].to_numpy(dtype=float),
+        mode="lines+markers",
+        name=model_label,
+        showlegend=showlegend,
+        line={"color": _COMPARISON_MODEL_COLORS[0]},
+        marker={"color": _COMPARISON_MODEL_COLORS[0]},
+        customdata=customdata,
+        connectgaps=False,
+        hovertemplate=(
+            "Model=%{fullData.name}<br>Horizon=%{x} h<br>"
+            "Regime=%{customdata[0]}<br>"
+            "Scored values=%{customdata[1]}<br>"
+            "Value=%{y:.3f}<extra></extra>"
+        ),
+    )
+    if row is None or column is None:
+        figure.add_trace(trace)
+    else:
+        figure.add_trace(trace, row=row, col=column)
 
 
 def _comparison_plot_rows(

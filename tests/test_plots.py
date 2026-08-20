@@ -20,6 +20,8 @@ from src.plots import (
     predicted_vs_actual_figure,
     quartile_comparison_figure,
     quartile_horizon_small_multiples_figure,
+    regime_aggregate_figure,
+    regime_horizon_figure,
 )
 
 # `plots.test_error_boxplots_figure` is reached through the module so pytest does
@@ -209,6 +211,219 @@ def test_regime_horizon_figures_support_different_cohorts(builder: object) -> No
         if builder is quartile_horizon_small_multiples_figure
         else 2
     )
+
+
+def _direct_regime_tables() -> tuple[pd.DataFrame, pd.DataFrame]:
+    aggregate_rows: list[dict[str, object]] = []
+    horizon_rows: list[dict[str, object]] = []
+    for regime_number, regime in enumerate(("Q1", "Q2", "Q3", "Q4", "Alarm")):
+        empty = regime == "Alarm"
+        aggregate_rows.append(
+            {
+                "regime": regime,
+                "horizon_hours": pd.NA,
+                "scored_values": 0 if empty else 2,
+                "mae": np.nan if empty else float(regime_number + 1),
+                "rmse": np.nan if empty else float(regime_number + 2),
+                "me": np.nan if empty else float(regime_number - 1),
+                "unrelated": "ignored",
+            }
+        )
+        for horizon in (1, 2, 3):
+            horizon_rows.append(
+                {
+                    "regime": regime,
+                    "horizon_hours": horizon,
+                    "scored_values": 0 if empty else horizon,
+                    "mae": np.nan if empty else float(regime_number + horizon),
+                    "rmse": np.nan if empty else float(regime_number + horizon + 1),
+                    "me": np.nan if empty else float(horizon - regime_number),
+                    "unrelated": "ignored",
+                }
+            )
+    return pd.DataFrame(aggregate_rows), pd.DataFrame(horizon_rows)
+
+
+@pytest.mark.parametrize(
+    "regime_group, expected_x",
+    [("quartile", ["Q1", "Q2", "Q3", "Q4"]), ("alarm", ["Ridge"])],
+)
+def test_regime_aggregate_figure_supports_both_groups_and_counts(
+    regime_group: str, expected_x: list[str]
+) -> None:
+    aggregate_metrics, _ = _direct_regime_tables()
+
+    figure = regime_aggregate_figure(
+        aggregate_metrics,
+        regime_group=regime_group,  # type: ignore[arg-type]
+        model_label="Ridge",
+    )
+
+    assert [annotation.text for annotation in figure.layout.annotations] == [
+        "MAE",
+        "RMSE",
+        "ME",
+    ]
+    assert "Ridge" in figure.layout.title.text
+    assert ("Q1–Q4" in figure.layout.title.text) is (regime_group == "quartile")
+    assert ("Alarm-level" in figure.layout.title.text) is (regime_group == "alarm")
+    assert len(figure.data) == 3
+    assert list(figure.data[0].x) == expected_x
+    assert "Scored values" in figure.data[0].hovertemplate
+    assert len(figure.layout.shapes) == 1
+
+
+@pytest.mark.parametrize("metric", ["mae", "rmse", "me"])
+@pytest.mark.parametrize("regime_group", ["quartile", "alarm"])
+def test_regime_horizon_figure_has_expected_layout_and_empty_gaps(
+    metric: str, regime_group: str
+) -> None:
+    _, horizon_metrics = _direct_regime_tables()
+
+    figure = regime_horizon_figure(
+        horizon_metrics,
+        regime_group=regime_group,  # type: ignore[arg-type]
+        metric=metric,  # type: ignore[arg-type]
+        model_label="Ridge",
+    )
+
+    assert isinstance(figure, go.Figure)
+    assert metric.upper() in figure.layout.title.text
+    assert "Ridge" in figure.layout.title.text
+    assert "Scored values" in figure.data[0].hovertemplate
+    assert len(figure.data) == (4 if regime_group == "quartile" else 1)
+    if regime_group == "quartile":
+        assert [annotation.text for annotation in figure.layout.annotations] == [
+            "Q1",
+            "Q2",
+            "Q3",
+            "Q4",
+        ]
+        assert list(figure.data[0].x) == [1, 2, 3]
+    else:
+        assert list(figure.data[0].x) == [1, 2, 3]
+        assert all(np.isnan(value) for value in figure.data[0].y)
+    assert len(figure.layout.shapes) == (
+        4
+        if metric == "me" and regime_group == "quartile"
+        else 1
+        if metric == "me"
+        else 0
+    )
+
+
+@pytest.mark.parametrize("regime_group", ["quartile", "alarm"])
+def test_direct_regime_figures_reject_invalid_groups_and_missing_labels(
+    regime_group: str,
+) -> None:
+    aggregate_metrics, horizon_metrics = _direct_regime_tables()
+    missing_regime = "Q4" if regime_group == "quartile" else "Alarm"
+    aggregate_metrics = aggregate_metrics.loc[
+        aggregate_metrics["regime"].ne(missing_regime)
+    ]
+    horizon_metrics = horizon_metrics.loc[horizon_metrics["regime"].ne(missing_regime)]
+
+    with pytest.raises(ValueError, match="missing regimes"):
+        regime_aggregate_figure(
+            aggregate_metrics,
+            regime_group=regime_group,  # type: ignore[arg-type]
+            model_label="Ridge",
+        )
+    with pytest.raises(ValueError, match="missing regimes"):
+        regime_horizon_figure(
+            horizon_metrics,
+            regime_group=regime_group,  # type: ignore[arg-type]
+            metric="mae",
+            model_label="Ridge",
+        )
+
+    with pytest.raises(ValueError, match="Unknown regime group"):
+        regime_aggregate_figure(
+            aggregate_metrics,
+            regime_group="invalid",  # type: ignore[arg-type]
+            model_label="Ridge",
+        )
+
+
+def test_direct_regime_figures_reject_missing_columns_duplicates_and_bad_values() -> (
+    None
+):
+    aggregate_metrics, horizon_metrics = _direct_regime_tables()
+
+    with pytest.raises(ValueError, match="missing columns"):
+        regime_aggregate_figure(
+            aggregate_metrics.drop(columns="me"),
+            regime_group="quartile",
+            model_label="Ridge",
+        )
+    with pytest.raises(ValueError, match="duplicate rows"):
+        regime_aggregate_figure(
+            pd.concat([aggregate_metrics, aggregate_metrics.iloc[[0]]]),
+            regime_group="quartile",
+            model_label="Ridge",
+        )
+    with pytest.raises(ValueError, match="duplicate rows"):
+        regime_horizon_figure(
+            pd.concat([horizon_metrics, horizon_metrics.iloc[[0]]]),
+            regime_group="quartile",
+            metric="mae",
+            model_label="Ridge",
+        )
+
+    malformed_horizons = horizon_metrics.copy()
+    malformed_horizons["horizon_hours"] = malformed_horizons["horizon_hours"].astype(
+        float
+    )
+    malformed_horizons.loc[malformed_horizons.index[0], "horizon_hours"] = 1.5
+    with pytest.raises(ValueError, match="positive integers"):
+        regime_horizon_figure(
+            malformed_horizons,
+            regime_group="quartile",
+            metric="mae",
+            model_label="Ridge",
+        )
+    incomplete_horizons = horizon_metrics.loc[horizon_metrics["horizon_hours"].ne(2)]
+    with pytest.raises(ValueError, match="contiguous sequence|cover every"):
+        regime_horizon_figure(
+            incomplete_horizons,
+            regime_group="quartile",
+            metric="mae",
+            model_label="Ridge",
+        )
+
+    reversed_horizons = horizon_metrics.copy()
+    reversed_horizons.loc[reversed_horizons["regime"].eq("Q1"), "horizon_hours"] = [
+        3,
+        2,
+        1,
+    ]
+    with pytest.raises(ValueError, match="horizon order"):
+        regime_horizon_figure(
+            reversed_horizons,
+            regime_group="quartile",
+            metric="mae",
+            model_label="Ridge",
+        )
+
+    invalid_metric = aggregate_metrics.copy()
+    invalid_metric.loc[invalid_metric["regime"].eq("Q1"), "mae"] = np.inf
+    with pytest.raises(ValueError, match="MAE"):
+        regime_aggregate_figure(
+            invalid_metric,
+            regime_group="quartile",
+            model_label="Ridge",
+        )
+    invalid_empty_metric = aggregate_metrics.copy()
+    invalid_empty_metric.loc[
+        invalid_empty_metric["regime"].eq("Alarm"), "scored_values"
+    ] = 2
+    invalid_empty_metric.loc[invalid_empty_metric["regime"].eq("Alarm"), "mae"] = np.nan
+    with pytest.raises(ValueError, match="MAE"):
+        regime_aggregate_figure(
+            invalid_empty_metric,
+            regime_group="alarm",
+            model_label="Ridge",
+        )
 
 
 def test_feature_subset_best_figure_uses_one_winner_per_model_and_subset() -> None:
