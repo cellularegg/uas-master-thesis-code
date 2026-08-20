@@ -5,6 +5,9 @@ data, using the [pegelalarm.at](https://pegelalarm.at/en/) API (Austrian
 water-level service). Target station `207241-at`, hourly height readings,
 forecasting 24 hours ahead.
 
+For an implementation-oriented walkthrough of fetching, preprocessing, feature
+engineering, and model training, see [Stages 1–4 pipeline guide](docs/pipeline.md).
+
 ## Setup
 
 1. `uv sync` (or `make requirements`)
@@ -38,17 +41,21 @@ training, while `make model_selection` re-runs evaluation first.
 | 4 | `04_04_train_xgboost.ipynb` | `make train-xgboost` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
 | 4 | `04_05_train_random_forest.ipynb` | `make train-random-forest` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
 | 4 | `04_06_train_extra_trees.ipynb` | `make train-extra-trees` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
-| — | (all six stage-4 models) | `make train` | — |
+| 4 | `04_07_train_rnn.ipynb` | `make train-rnn` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
+| — | persistence, Ridge, MLP, XGBoost, Extra Trees, and RNN | `make train` | runs the current six-notebook training set; excludes Random Forest |
 | 5 | `05_evaluate.ipynb` | `make evaluate` | comparison plots/tables |
 | 6 | `06_model_selection.ipynb` | `make model_selection` (runs 05 + 06) | selected model/run |
 
-All six `04_*_train_*.ipynb` notebooks share stage number 4: they are parallel
-model candidates, not sequential steps. They use the same joined cohort and
-validation folds; Ridge, MLP, XGBoost, Random Forest, and Extra Trees also
-write a selected model and manifest to `models/`. `make evaluate` and
-`make model_selection` assume `make train` has already been run. If you're
-starting from scratch, run
-the full pipeline top to bottom with `make data features train evaluate model_selection`.
+All seven `04_*_train_*.ipynb` notebooks share stage number 4: they are parallel
+model candidates, not sequential steps. The flat-feature candidates use the
+same joined cohort and validation folds; the RNN narrows that cohort further for
+each sequence length. Every fitted model notebook writes a selected model and
+durable manifest to `models/`; persistence has no fitted artifact. The current
+`make train` target excludes Random Forest, which remains available separately
+through `make train-random-forest`. `make evaluate` and `make model_selection`
+assume the desired training notebooks have already been run. If you're starting
+from scratch, run the default pipeline top to bottom with
+`make data features train evaluate model_selection`.
 
 The active stage-4 notebooks display prediction previews and aggregate/per-horizon
 metrics. They log candidate and sealed-test runs to MLflow; the fitted-model
