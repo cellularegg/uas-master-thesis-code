@@ -3,18 +3,170 @@ from typing import NamedTuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go  # type: ignore[import-untyped]
 import pytest
 
 from src import plots
 from src.plots import (
+    aggregate_comparison_figure,
     cv_error_boxplots_figure,
+    feature_subset_best_comparison_figure,
+    feature_subset_candidate_distribution_figure,
     forecast_window_figures,
+    horizon_comparison_figure,
     predicted_vs_actual_figure,
 )
 
 # `plots.test_error_boxplots_figure` is reached through the module so pytest does
 # not collect the imported builder itself as a test case.
 build_test_error_boxplots_figure = plots.test_error_boxplots_figure
+
+
+def _comparison_metrics() -> pd.DataFrame:
+    rows = []
+    for phase in ("cross_validation", "sealed_test"):
+        for model_number, model in enumerate(("Persistence", "Ridge"), start=1):
+            for metric_number, metric in enumerate(
+                ("mae", "rmse", "me", "r2"), start=1
+            ):
+                rows.append(
+                    {
+                        "model": model,
+                        "phase": phase,
+                        "metric": metric,
+                        "scope": "aggregate",
+                        "horizon": pd.NA,
+                        "value": float(model_number + metric_number),
+                        "cv_std": 0.25 if phase == "cross_validation" else pd.NA,
+                    }
+                )
+                for horizon in (1, 2):
+                    rows.append(
+                        {
+                            "model": model,
+                            "phase": phase,
+                            "metric": metric,
+                            "scope": "horizon",
+                            "horizon": horizon,
+                            "value": float(model_number + metric_number + horizon),
+                            "cv_std": (0.25 if phase == "cross_validation" else pd.NA),
+                        }
+                    )
+    return pd.DataFrame(rows)
+
+
+def _feature_subset_metrics() -> pd.DataFrame:
+    rows = []
+    for model_number, model in enumerate(("Ridge", "XGBoost"), start=1):
+        for subset_number, subset in enumerate(
+            ("full", "target_station_full"), start=1
+        ):
+            for candidate_number in (1, 2):
+                row: dict[str, object] = {
+                    "model": model,
+                    "subset": subset,
+                    "candidate_parameters": f"candidate={candidate_number}",
+                    "is_best_within_subset": candidate_number == 1,
+                }
+                for metric_number, metric in enumerate(
+                    ("mae", "rmse", "me", "r2"), start=1
+                ):
+                    row[f"cv_{metric}_mean"] = float(
+                        model_number + subset_number + candidate_number + metric_number
+                    )
+                    row[f"cv_{metric}_std"] = metric_number / 10
+                rows.append(row)
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize(
+    "builder", [aggregate_comparison_figure, horizon_comparison_figure]
+)
+def test_comparison_figures_show_all_metrics_and_cv_uncertainty(
+    builder: object,
+) -> None:
+    figure = builder(_comparison_metrics(), phase="cross_validation")  # type: ignore[operator]
+
+    assert isinstance(figure, go.Figure)
+    assert [annotation.text for annotation in figure.layout.annotations] == [
+        "MAE",
+        "RMSE",
+        "ME",
+        "R²",
+    ]
+    assert all(trace.error_y.visible for trace in figure.data)
+    colors_by_model: dict[str, set[str]] = {}
+    for trace in figure.data:
+        color = trace.line.color or trace.marker.color
+        colors_by_model.setdefault(trace.name, set()).add(color)
+    assert all(len(colors) == 1 for colors in colors_by_model.values())
+    assert len({next(iter(colors)) for colors in colors_by_model.values()}) == len(
+        colors_by_model
+    )
+
+
+@pytest.mark.parametrize(
+    "builder", [aggregate_comparison_figure, horizon_comparison_figure]
+)
+def test_sealed_test_comparison_figures_have_no_error_bars(builder: object) -> None:
+    figure = builder(_comparison_metrics(), phase="sealed_test")  # type: ignore[operator]
+
+    assert isinstance(figure, go.Figure)
+    assert len(figure.layout.annotations) == 4
+    assert all(trace.error_y.visible is None for trace in figure.data)
+
+
+def test_horizon_comparison_figure_uses_same_grid_interval_in_every_panel() -> None:
+    figure = horizon_comparison_figure(_comparison_metrics(), phase="cross_validation")
+
+    assert all(
+        getattr(figure.layout, axis_name).dtick == 1
+        for axis_name in ("xaxis", "xaxis2", "xaxis3", "xaxis4")
+    )
+
+
+def test_feature_subset_best_figure_uses_one_winner_per_model_and_subset() -> None:
+    comparison_metrics = _comparison_metrics()
+    figure = feature_subset_best_comparison_figure(
+        _feature_subset_metrics(), comparison_metrics
+    )
+
+    assert isinstance(figure, go.Figure)
+    assert len(figure.data) == 3 * 4
+    assert all(trace.error_y.visible for trace in figure.data)
+    assert all(len(trace.x) == 2 for trace in figure.data)
+    baseline_traces = [
+        trace for trace in figure.data if trace.name == "Persistence baseline"
+    ]
+    assert len(baseline_traces) == 4
+    assert all(trace.line.dash == "dash" for trace in baseline_traces)
+    assert [trace.y[0] for trace in baseline_traces] == [2.0, 3.0, 4.0, 5.0]
+    assert [annotation.text for annotation in figure.layout.annotations] == [
+        "MAE",
+        "RMSE",
+        "ME",
+        "R²",
+    ]
+
+
+def test_feature_subset_candidate_distribution_shows_every_candidate() -> None:
+    metrics = _feature_subset_metrics()
+
+    figure = feature_subset_candidate_distribution_figure(
+        metrics, _comparison_metrics()
+    )
+
+    assert isinstance(figure, go.Figure)
+    box_traces = [trace for trace in figure.data if trace.type == "box"]
+    baseline_traces = [
+        trace for trace in figure.data if trace.name == "Persistence baseline"
+    ]
+    assert len(box_traces) == 2 * 4
+    assert all(len(trace.y) == 4 for trace in box_traces)
+    assert len(baseline_traces) == 4
+    assert all(trace.type == "scatter" for trace in baseline_traces)
+    assert all(trace.line.dash == "dash" for trace in baseline_traces)
+    assert figure.layout.boxmode == "group"
 
 
 def test_predicted_vs_actual_figure_shows_each_horizon_and_combined_values() -> None:

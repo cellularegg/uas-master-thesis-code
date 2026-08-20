@@ -3,11 +3,13 @@
 import locale
 import math
 from collections.abc import Sequence
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go  # type: ignore[import-untyped]
+from plotly.subplots import make_subplots  # type: ignore[import-untyped]
 
 from src.config import MATPLOTLIB_STYLE
 from src.training import validate_predictions
@@ -22,6 +24,46 @@ plt.rcParams["axes.formatter.use_locale"] = True
 _CONTEXT_WINDOW_HOURS = 48
 # Hours of neighbouring issue times reachable from a forecast-window slider.
 _SLIDER_WINDOW_HOURS = 12
+
+type ComparisonPhase = Literal["cross_validation", "sealed_test"]
+
+_COMPARISON_METRIC_TITLES = {
+    "mae": "MAE",
+    "rmse": "RMSE",
+    "me": "ME",
+    "r2": "R²",
+}
+_COMPARISON_MODEL_COLORS = (
+    "#636EFA",
+    "#EF553B",
+    "#00CC96",
+    "#AB63FA",
+    "#FFA15A",
+    "#19D3F3",
+    "#FF6692",
+    "#B6E880",
+    "#FF97FF",
+    "#FECB52",
+)
+_PERSISTENCE_BASELINE_COLOR = "#7F7F7F"
+_FEATURE_SUBSET_ORDER = (
+    "full",
+    "all_station_hydrology_quality_time",
+    "raw_all_stations",
+    "target_station_full",
+    "target_station_hydrology_quality_time",
+    "current_water_levels_all_stations",
+)
+_FEATURE_SUBSET_LABELS = {
+    "full": "Full",
+    "all_station_hydrology_quality_time": "All-station hydrology,<br>quality & time",
+    "raw_all_stations": "Raw,<br>all stations",
+    "target_station_full": "Target-station<br>full",
+    "target_station_hydrology_quality_time": (
+        "Target-station hydrology,<br>quality & time"
+    ),
+    "current_water_levels_all_stations": "Current water levels,<br>all stations",
+}
 
 
 def predicted_vs_actual_figure(
@@ -198,6 +240,555 @@ def test_error_boxplots_figure(
         title=title,
         summary_markers=markers,
     )
+
+
+def aggregate_comparison_figure(
+    comparison_metrics: pd.DataFrame,
+    *,
+    phase: ComparisonPhase,
+) -> go.Figure:
+    """Build a four-metric aggregate comparison figure for one evaluation phase.
+
+    Args:
+        comparison_metrics: Canonical tidy comparison metrics from
+            :func:`src.evaluation.load_latest_complete_comparison_metrics`.
+        phase: Either ``"cross_validation"`` or ``"sealed_test"``.
+
+    Returns:
+        A four-panel model comparison. Cross-validation values include their
+        logged standard deviations; sealed-test values are point estimates.
+
+    Raises:
+        ValueError: If required rows are absent, duplicated, or non-finite.
+    """
+    rows = _comparison_plot_rows(comparison_metrics, phase=phase, scope="aggregate")
+    models = rows["model"].drop_duplicates().astype(str).tolist()
+    model_colors = _comparison_model_color_map(models)
+    figure = make_subplots(
+        rows=2,
+        cols=2,
+        subplot_titles=list(_COMPARISON_METRIC_TITLES.values()),
+    )
+    for plot_number, (metric, _) in enumerate(
+        _COMPARISON_METRIC_TITLES.items(), start=1
+    ):
+        row = (plot_number - 1) // 2 + 1
+        column = (plot_number - 1) % 2 + 1
+        metric_rows = rows.loc[rows["metric"].eq(metric)]
+        if metric_rows["model"].duplicated().any():
+            raise ValueError(f"Aggregate {metric.upper()} rows duplicate a model")
+        metric_models = metric_rows["model"].astype(str).tolist()
+        values = metric_rows["value"].to_numpy(dtype=float)
+        standard_deviations = (
+            metric_rows["cv_std"].to_numpy(dtype=float)
+            if phase == "cross_validation"
+            else np.full(len(metric_rows), np.nan)
+        )
+        for model, value, standard_deviation in zip(
+            metric_models, values, standard_deviations, strict=True
+        ):
+            error_y = None
+            if phase == "cross_validation":
+                error_y = {
+                    "type": "data",
+                    "array": [standard_deviation],
+                    "visible": True,
+                }
+            figure.add_trace(
+                go.Scatter(
+                    x=[model],
+                    y=[value],
+                    mode="markers",
+                    name=model,
+                    legendgroup=model,
+                    showlegend=plot_number == 1,
+                    error_y=error_y,
+                    marker={"color": model_colors[model], "size": 9},
+                    hovertemplate=(
+                        "Model=%{x}<br>Value=%{y:.3f}<extra>"
+                        f"{_COMPARISON_METRIC_TITLES[metric]}</extra>"
+                    ),
+                ),
+                row=row,
+                col=column,
+            )
+        figure.update_xaxes(tickangle=-20, row=row, col=column)
+        figure.update_yaxes(title_text="Metric value", row=row, col=column)
+        if metric == "me":
+            figure.add_hline(
+                y=0.0,
+                line={"color": "black", "dash": "dash", "width": 1},
+                row=row,
+                col=column,
+            )
+    phase_title = (
+        "Cross-validation mean ± standard deviation"
+        if phase == "cross_validation"
+        else "Sealed-test point estimates"
+    )
+    figure.update_layout(
+        title=f"Aggregate model comparison — {phase_title}",
+        template="plotly_white",
+        height=750,
+    )
+    return figure
+
+
+def horizon_comparison_figure(
+    comparison_metrics: pd.DataFrame,
+    *,
+    phase: ComparisonPhase,
+) -> go.Figure:
+    """Build a four-metric per-horizon comparison figure for one phase.
+
+    Args:
+        comparison_metrics: Canonical tidy comparison metrics from
+            :func:`src.evaluation.load_latest_complete_comparison_metrics`.
+        phase: Either ``"cross_validation"`` or ``"sealed_test"``.
+
+    Returns:
+        A four-panel per-horizon model comparison. Cross-validation values
+        include their logged standard deviations; sealed-test values are point
+        estimates.
+
+    Raises:
+        ValueError: If required rows are absent, duplicated, incomplete, or
+            non-finite.
+    """
+    rows = _comparison_plot_rows(comparison_metrics, phase=phase, scope="horizon")
+    models = rows["model"].drop_duplicates().astype(str).tolist()
+    model_colors = _comparison_model_color_map(models)
+    horizons = sorted(rows["horizon"].astype(int).unique().tolist())
+    if horizons != list(range(1, max(horizons) + 1)):
+        raise ValueError("Horizon comparison rows do not form a contiguous horizon")
+
+    figure = make_subplots(
+        rows=2,
+        cols=2,
+        shared_xaxes=True,
+        subplot_titles=list(_COMPARISON_METRIC_TITLES.values()),
+    )
+    for plot_number, (metric, _) in enumerate(
+        _COMPARISON_METRIC_TITLES.items(), start=1
+    ):
+        row = (plot_number - 1) // 2 + 1
+        column = (plot_number - 1) % 2 + 1
+        metric_rows = rows.loc[rows["metric"].eq(metric)]
+        if metric_rows.duplicated(["model", "horizon"]).any():
+            raise ValueError(f"Horizon {metric.upper()} rows duplicate a model/horizon")
+        for model in models:
+            model_rows = metric_rows.loc[metric_rows["model"].eq(model)].sort_values(
+                "horizon", kind="stable"
+            )
+            if model_rows["horizon"].astype(int).tolist() != horizons:
+                raise ValueError(
+                    f"Horizon {metric.upper()} rows do not cover every horizon "
+                    f"for {model}"
+                )
+            values = model_rows["value"].to_numpy(dtype=float)
+            error_y = None
+            if phase == "cross_validation":
+                error_y = {
+                    "type": "data",
+                    "array": model_rows["cv_std"].to_numpy(dtype=float),
+                    "visible": True,
+                }
+            figure.add_trace(
+                go.Scatter(
+                    x=horizons,
+                    y=values,
+                    mode="lines+markers",
+                    name=model,
+                    legendgroup=model,
+                    showlegend=plot_number == 1,
+                    error_y=error_y,
+                    line={"color": model_colors[model]},
+                    marker={"color": model_colors[model]},
+                    hovertemplate=(
+                        "Model=%{fullData.name}<br>Horizon=%{x} h"
+                        "<br>Value=%{y:.3f}<extra></extra>"
+                    ),
+                ),
+                row=row,
+                col=column,
+            )
+        figure.update_yaxes(title_text="Metric value", row=row, col=column)
+        if metric == "me":
+            figure.add_hline(
+                y=0.0,
+                line={"color": "black", "dash": "dash", "width": 1},
+                row=row,
+                col=column,
+            )
+    figure.update_xaxes(dtick=1)
+    for column in (1, 2):
+        figure.update_xaxes(
+            title_text="Forecast horizon (hours)",
+            row=2,
+            col=column,
+        )
+    phase_title = (
+        "Cross-validation mean ± standard deviation"
+        if phase == "cross_validation"
+        else "Sealed-test point estimates"
+    )
+    figure.update_layout(
+        title=f"Per-horizon model comparison — {phase_title}",
+        template="plotly_white",
+        height=750,
+        hovermode="x unified",
+    )
+    return figure
+
+
+def feature_subset_best_comparison_figure(
+    feature_subset_metrics: pd.DataFrame,
+    comparison_metrics: pd.DataFrame,
+) -> go.Figure:
+    """Compare each model's best aggregate-CV candidate per feature subset.
+
+    Args:
+        feature_subset_metrics: Candidate rows from
+            :func:`src.evaluation.load_latest_complete_feature_subset_cv_metrics`.
+        comparison_metrics: Canonical tidy comparison metrics from
+            :func:`src.evaluation.load_latest_complete_comparison_metrics`.
+
+    Returns:
+        A four-panel comparison of CV means with fold-to-fold standard deviations.
+
+    Raises:
+        ValueError: If required candidate rows are absent, duplicated, or non-finite.
+    """
+    rows = _feature_subset_plot_rows(feature_subset_metrics)
+    persistence_rows = _persistence_baseline_rows(comparison_metrics)
+    rows = rows.loc[rows["is_best_within_subset"].eq(True)].copy()
+    if rows.empty:
+        raise ValueError("No best-within-subset candidate rows were found")
+    if rows.duplicated(["model", "subset"]).any():
+        raise ValueError("Best feature-subset rows duplicate a model/subset")
+
+    models = rows["model"].drop_duplicates().astype(str).tolist()
+    model_colors = _comparison_model_color_map(models)
+    subsets = _ordered_feature_subsets(rows["subset"])
+    figure = make_subplots(
+        rows=2,
+        cols=2,
+        subplot_titles=list(_COMPARISON_METRIC_TITLES.values()),
+    )
+    for plot_number, metric in enumerate(_COMPARISON_METRIC_TITLES, start=1):
+        row = (plot_number - 1) // 2 + 1
+        column = (plot_number - 1) % 2 + 1
+        baseline = persistence_rows.loc[persistence_rows["metric"].eq(metric)].iloc[0]
+        subset_labels = [_feature_subset_label(name) for name in subsets]
+        figure.add_trace(
+            go.Scatter(
+                x=subset_labels,
+                y=[float(baseline["value"])] * len(subsets),
+                mode="lines",
+                name="Persistence baseline",
+                legendgroup="Persistence baseline",
+                showlegend=plot_number == 1,
+                error_y={
+                    "type": "data",
+                    "array": [float(baseline["cv_std"])] * len(subsets),
+                    "visible": True,
+                },
+                line={
+                    "color": _PERSISTENCE_BASELINE_COLOR,
+                    "dash": "dash",
+                    "width": 2,
+                },
+                hovertemplate=(
+                    "Persistence baseline<br>Value=%{y:.3f}<br>"
+                    f"CV standard deviation={float(baseline['cv_std']):.3f}"
+                    "<extra></extra>"
+                ),
+            ),
+            row=row,
+            col=column,
+        )
+        for model in models:
+            model_rows = rows.loc[rows["model"].eq(model)].copy()
+            model_rows["__subset_order"] = model_rows["subset"].map(subsets.index)
+            model_rows = model_rows.sort_values("__subset_order", kind="stable")
+            raw_subsets = model_rows["subset"].astype(str).tolist()
+            figure.add_trace(
+                go.Scatter(
+                    x=[_feature_subset_label(name) for name in raw_subsets],
+                    y=model_rows[f"cv_{metric}_mean"].to_numpy(dtype=float),
+                    mode="lines+markers",
+                    name=model,
+                    legendgroup=model,
+                    showlegend=plot_number == 1,
+                    error_y={
+                        "type": "data",
+                        "array": model_rows[f"cv_{metric}_std"].to_numpy(dtype=float),
+                        "visible": True,
+                    },
+                    line={"color": model_colors[model]},
+                    marker={"color": model_colors[model], "size": 8},
+                    customdata=np.column_stack(
+                        [
+                            raw_subsets,
+                            model_rows["candidate_parameters"].astype(str),
+                        ]
+                    ),
+                    hovertemplate=(
+                        "Model=%{fullData.name}<br>Subset=%{customdata[0]}"
+                        "<br>Value=%{y:.3f}<br>%{customdata[1]}<extra></extra>"
+                    ),
+                ),
+                row=row,
+                col=column,
+            )
+        figure.update_xaxes(tickangle=-20, row=row, col=column)
+        figure.update_yaxes(title_text="CV metric value", row=row, col=column)
+        if metric == "me":
+            figure.add_hline(
+                y=0.0,
+                line={"color": "black", "dash": "dash", "width": 1},
+                row=row,
+                col=column,
+            )
+    figure.update_layout(
+        title="Best candidate within each feature subset — aggregate CV mean ± standard deviation",
+        template="plotly_white",
+        height=800,
+        hovermode="closest",
+    )
+    return figure
+
+
+def feature_subset_candidate_distribution_figure(
+    feature_subset_metrics: pd.DataFrame,
+    comparison_metrics: pd.DataFrame,
+) -> go.Figure:
+    """Show aggregate-CV metric distributions across every subset candidate.
+
+    Args:
+        feature_subset_metrics: Candidate rows from
+            :func:`src.evaluation.load_latest_complete_feature_subset_cv_metrics`.
+        comparison_metrics: Canonical tidy comparison metrics from
+            :func:`src.evaluation.load_latest_complete_comparison_metrics`.
+
+    Returns:
+        A four-panel grouped box-plot comparison. Each point is one candidate's
+        mean metric across validation folds.
+
+    Raises:
+        ValueError: If required candidate rows are absent or non-finite.
+    """
+    rows = _feature_subset_plot_rows(feature_subset_metrics)
+    persistence_rows = _persistence_baseline_rows(comparison_metrics)
+    models = rows["model"].drop_duplicates().astype(str).tolist()
+    model_colors = _comparison_model_color_map(models)
+    subsets = _ordered_feature_subsets(rows["subset"])
+    figure = make_subplots(
+        rows=2,
+        cols=2,
+        subplot_titles=list(_COMPARISON_METRIC_TITLES.values()),
+    )
+    for plot_number, metric in enumerate(_COMPARISON_METRIC_TITLES, start=1):
+        row = (plot_number - 1) // 2 + 1
+        column = (plot_number - 1) % 2 + 1
+        baseline = persistence_rows.loc[persistence_rows["metric"].eq(metric)].iloc[0]
+        figure.add_trace(
+            go.Scatter(
+                x=[_feature_subset_label(name) for name in subsets],
+                y=[float(baseline["value"])] * len(subsets),
+                mode="lines",
+                name="Persistence baseline",
+                legendgroup="Persistence baseline",
+                showlegend=plot_number == 1,
+                line={
+                    "color": _PERSISTENCE_BASELINE_COLOR,
+                    "dash": "dash",
+                    "width": 2,
+                },
+                hovertemplate=(
+                    "Persistence baseline<br>CV mean=%{y:.3f}<br>"
+                    f"CV standard deviation={float(baseline['cv_std']):.3f}"
+                    "<extra></extra>"
+                ),
+            ),
+            row=row,
+            col=column,
+        )
+        for model in models:
+            model_rows = rows.loc[rows["model"].eq(model)].copy()
+            model_rows["__subset_order"] = model_rows["subset"].map(subsets.index)
+            model_rows = model_rows.sort_values("__subset_order", kind="stable")
+            raw_subsets = model_rows["subset"].astype(str).tolist()
+            figure.add_trace(
+                go.Box(
+                    x=[_feature_subset_label(name) for name in raw_subsets],
+                    y=model_rows[f"cv_{metric}_mean"].to_numpy(dtype=float),
+                    name=model,
+                    legendgroup=model,
+                    offsetgroup=model,
+                    showlegend=plot_number == 1,
+                    boxpoints="all",
+                    jitter=0.25,
+                    pointpos=0,
+                    boxmean=True,
+                    marker={"color": model_colors[model], "size": 4, "opacity": 0.6},
+                    line={"color": model_colors[model]},
+                    customdata=np.column_stack(
+                        [
+                            raw_subsets,
+                            model_rows["candidate_parameters"].astype(str),
+                        ]
+                    ),
+                    hovertemplate=(
+                        "Model=%{fullData.name}<br>Subset=%{customdata[0]}"
+                        "<br>Candidate CV mean=%{y:.3f}"
+                        "<br>%{customdata[1]}<extra></extra>"
+                    ),
+                ),
+                row=row,
+                col=column,
+            )
+        figure.update_xaxes(tickangle=-20, row=row, col=column)
+        figure.update_yaxes(title_text="Candidate CV mean", row=row, col=column)
+        if metric == "me":
+            figure.add_hline(
+                y=0.0,
+                line={"color": "black", "dash": "dash", "width": 1},
+                row=row,
+                col=column,
+            )
+    figure.update_layout(
+        title="All candidates by feature subset — distribution of aggregate CV means",
+        template="plotly_white",
+        height=800,
+        boxmode="group",
+        hovermode="closest",
+    )
+    return figure
+
+
+def _feature_subset_plot_rows(feature_subset_metrics: pd.DataFrame) -> pd.DataFrame:
+    """Validate and return canonical feature-subset candidate rows."""
+    required_columns = {
+        "model",
+        "subset",
+        "candidate_parameters",
+        "is_best_within_subset",
+        *[
+            f"cv_{metric}_{statistic}"
+            for metric in _COMPARISON_METRIC_TITLES
+            for statistic in ("mean", "std")
+        ],
+    }
+    missing_columns = sorted(
+        required_columns.difference(feature_subset_metrics.columns)
+    )
+    if missing_columns:
+        raise ValueError(
+            f"Feature-subset metrics are missing columns: {missing_columns}"
+        )
+    if feature_subset_metrics.empty:
+        raise ValueError("No feature-subset candidate rows were found")
+    metric_columns = [
+        f"cv_{metric}_{statistic}"
+        for metric in _COMPARISON_METRIC_TITLES
+        for statistic in ("mean", "std")
+    ]
+    if not np.isfinite(
+        feature_subset_metrics[metric_columns].to_numpy(dtype=float)
+    ).all():
+        raise ValueError("Feature-subset metrics contain non-finite values")
+    if feature_subset_metrics[["model", "subset"]].isna().any(axis=None):
+        raise ValueError("Feature-subset model and subset names must be non-null")
+    return feature_subset_metrics.copy()
+
+
+def _persistence_baseline_rows(comparison_metrics: pd.DataFrame) -> pd.DataFrame:
+    """Validate and return aggregate cross-validation persistence rows."""
+    rows = _comparison_plot_rows(
+        comparison_metrics,
+        phase="cross_validation",
+        scope="aggregate",
+    )
+    rows = rows.loc[rows["model"].eq("Persistence")].copy()
+    if rows.empty:
+        raise ValueError("No aggregate cross-validation persistence rows were found")
+    if rows["metric"].duplicated().any():
+        raise ValueError("Persistence baseline rows duplicate a metric")
+    missing_metrics = sorted(set(_COMPARISON_METRIC_TITLES).difference(rows["metric"]))
+    if missing_metrics:
+        raise ValueError(
+            f"Persistence baseline rows are missing metrics: {missing_metrics}"
+        )
+    return rows
+
+
+def _ordered_feature_subsets(subsets: pd.Series) -> list[str]:
+    """Return known feature subsets first, preserving unknown subset order."""
+    observed = subsets.drop_duplicates().astype(str).tolist()
+    return [name for name in _FEATURE_SUBSET_ORDER if name in observed] + [
+        name for name in observed if name not in _FEATURE_SUBSET_ORDER
+    ]
+
+
+def _feature_subset_label(subset: str) -> str:
+    """Return a compact plot label for one feature-subset contract name."""
+    return _FEATURE_SUBSET_LABELS.get(subset, subset.replace("_", " ").title())
+
+
+def _comparison_model_color_map(models: Sequence[str]) -> dict[str, str]:
+    """Assign each model one stable color within a comparison figure."""
+    return {
+        model: _COMPARISON_MODEL_COLORS[index % len(_COMPARISON_MODEL_COLORS)]
+        for index, model in enumerate(models)
+    }
+
+
+def _comparison_plot_rows(
+    comparison_metrics: pd.DataFrame,
+    *,
+    phase: ComparisonPhase,
+    scope: Literal["aggregate", "horizon"],
+) -> pd.DataFrame:
+    """Validate and return canonical comparison rows for a figure."""
+    if phase not in ("cross_validation", "sealed_test"):
+        raise ValueError(f"Unknown comparison phase: {phase!r}")
+    required_columns = {
+        "model",
+        "phase",
+        "metric",
+        "scope",
+        "horizon",
+        "value",
+        "cv_std",
+    }
+    missing_columns = sorted(required_columns.difference(comparison_metrics.columns))
+    if missing_columns:
+        raise ValueError(f"Comparison metrics are missing columns: {missing_columns}")
+    rows = comparison_metrics.loc[
+        comparison_metrics["phase"].eq(phase)
+        & comparison_metrics["scope"].eq(scope)
+        & comparison_metrics["metric"].isin(_COMPARISON_METRIC_TITLES)
+    ].copy()
+    if rows.empty:
+        raise ValueError(f"No {phase} {scope} comparison rows were found")
+    missing_metrics = sorted(set(_COMPARISON_METRIC_TITLES).difference(rows["metric"]))
+    if missing_metrics:
+        raise ValueError(f"Comparison rows are missing metrics: {missing_metrics}")
+    if not np.isfinite(rows["value"].to_numpy(dtype=float)).all():
+        raise ValueError("Comparison metric values contain non-finite values")
+    if (
+        phase == "cross_validation"
+        and not np.isfinite(rows["cv_std"].to_numpy(dtype=float)).all()
+    ):
+        raise ValueError(
+            "Cross-validation standard deviations contain non-finite values"
+        )
+    if scope == "aggregate" and rows["horizon"].notna().any():
+        raise ValueError("Aggregate comparison rows must have null horizons")
+    if scope == "horizon" and rows["horizon"].isna().any():
+        raise ValueError("Horizon comparison rows must have integer horizons")
+    return rows
 
 
 def _error_boxplots_figure(
