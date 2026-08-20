@@ -65,6 +65,8 @@ def _write_feature_artifacts(root: Path) -> tuple[JoinedDataset, Path, Path]:
         )
         for predictor_number, column in enumerate(predictor_columns, start=1):
             built[column] = predictor_number + np.arange(row_count, dtype=float)
+        built[f"{station_id}__imputed"] = False
+        built["station-b__imputed"] = False
         for horizon, column in enumerate(target_columns, start=1):
             built[column] = 10.0 * np.arange(row_count, dtype=float) + horizon
         return built
@@ -114,31 +116,12 @@ def _cv_results(selected_cell_type: str = "gru") -> pd.DataFrame:
     )
 
 
-def _per_horizon_metrics(horizons: int = FORECAST_HORIZON_HOURS) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "station_id": TARGET_STATION_ID,
-                "horizon_hours": horizon,
-                "target": f"target_{horizon:02d}",
-                "mae": 1.0 + horizon,
-                "rmse": 2.0 + horizon,
-                "me": 0.25,
-                "r2": 0.75,
-            }
-            for horizon in range(1, horizons + 1)
-        ]
-    )
-
-
 def _save(
     dataset: JoinedDataset,
     manifest_path: Path,
     *,
     channel_columns: list[str] | None = None,
     selected_cell_type: str = "gru",
-    per_horizon_metrics: pd.DataFrame | None = None,
-    sealed_test_metrics: dict[str, float] | None = None,
 ) -> None:
     save_rnn_manifest(
         manifest_path,
@@ -155,18 +138,6 @@ def _save(
         selected_hidden_size=8,
         selected_num_layers=1,
         fixed_dropout=0.1,
-        selection_metric="rmse",
-        cv_results=_cv_results(selected_cell_type),
-        sealed_test_metrics=sealed_test_metrics
-        or {"test_mae": 1.0, "test_rmse": 2.0, "test_me": 0.25, "test_r2": 0.75},
-        per_horizon_metrics=(
-            _per_horizon_metrics()
-            if per_horizon_metrics is None
-            else per_horizon_metrics
-        ),
-        scored_test_rows=37,
-        cohort={"train_eligible_rows": len(dataset.train_rows)},
-        training={"source_artifact": "train.parquet"},
     )
 
 
@@ -443,7 +414,7 @@ def test_rnn_forecaster_persists_a_cpu_module_via_joblib(tmp_path: Path) -> None
     assert next(reloaded.module_.parameters()).device.type == "cpu"
 
 
-def test_rnn_manifest_round_trips_the_selection_and_sealed_test_record(
+def test_rnn_manifest_round_trips_the_model_contract(
     tmp_path: Path,
 ) -> None:
     dataset, _train_path, _test_path = _write_feature_artifacts(tmp_path)
@@ -457,29 +428,31 @@ def test_rnn_manifest_round_trips_the_selection_and_sealed_test_record(
     )
 
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert stored["schema_version"] == "1.0"
+    assert stored["schema_version"] == "3.0"
+    assert not {
+        "selection_metric",
+        "tie_breaking",
+        "full_feature_columns",
+        "feature_subsets",
+        "cv_results",
+        "sealed_test_metrics",
+        "horizon_metrics",
+        "scored_test_rows",
+        "regime_definition",
+        "regime_metrics",
+        "common_cohort_eligibility",
+        "training",
+    }.intersection(stored)
     assert manifest.execution_uuid == "execution-1"
     assert manifest.selected_cell_type == "gru"
     assert manifest.selected_sequence_length == 4
     assert manifest.selected_hidden_size == 8
     assert manifest.selected_num_layers == 1
     assert manifest.fixed_dropout == 0.1
-    assert manifest.selection_metric == "rmse"
     assert manifest.channel_columns == tuple(
         dataset.feature_subsets["raw_all_stations"]
     )
     assert manifest.target_columns == dataset.contract.target_columns
-    assert manifest.cv_results["cell_type"].tolist() == ["gru", "lstm"]
-    assert manifest.sealed_test_metrics == {
-        "test_mae": 1.0,
-        "test_rmse": 2.0,
-        "test_me": 0.25,
-        "test_r2": 0.75,
-    }
-    assert manifest.scored_test_rows == 37
-    assert manifest.horizon_metrics["horizon_hours"].tolist() == list(
-        range(1, FORECAST_HORIZON_HOURS + 1)
-    )
 
 
 def test_load_rnn_manifest_reports_missing_manifest(tmp_path: Path) -> None:
@@ -533,39 +506,6 @@ def test_load_rnn_manifest_rejects_contract_mismatches(tmp_path: Path) -> None:
             )
 
 
-def test_save_rnn_manifest_rejects_an_incomplete_sealed_test_record(
-    tmp_path: Path,
-) -> None:
-    dataset, _train_path, _test_path = _write_feature_artifacts(tmp_path)
-    manifest_path = tmp_path / "rnn.json"
-
-    with pytest.raises(ValueError, match="Sealed-test metrics are missing"):
-        _save(
-            dataset,
-            manifest_path,
-            sealed_test_metrics={"test_mae": 1.0, "test_rmse": 2.0},
-        )
-    with pytest.raises(ValueError, match="non-finite"):
-        _save(
-            dataset,
-            manifest_path,
-            sealed_test_metrics={
-                "test_mae": float("nan"),
-                "test_rmse": 2.0,
-                "test_me": 0.25,
-                "test_r2": 0.75,
-            },
-        )
-    with pytest.raises(ValueError, match="do not match the forecast contract"):
-        _save(
-            dataset,
-            manifest_path,
-            per_horizon_metrics=_per_horizon_metrics(FORECAST_HORIZON_HOURS - 1),
-        )
-    # Nothing is written until every check passes.
-    assert not manifest_path.exists()
-
-
 class _FakeSavedRnn:
     def __init__(self) -> None:
         self.sequence_values: np.ndarray | None = None
@@ -594,18 +534,8 @@ def test_score_saved_model_scores_only_the_sequence_eligible_cohort(
         selected_hidden_size=8,
         selected_num_layers=1,
         fixed_dropout=0.1,
-        selection_metric="rmse",
         channel_columns=tuple(channel_columns),
         target_columns=dataset.contract.target_columns,
-        cv_results=_cv_results(),
-        sealed_test_metrics={
-            "test_mae": 1.0,
-            "test_rmse": 2.0,
-            "test_me": 0.25,
-            "test_r2": 0.75,
-        },
-        horizon_metrics=_per_horizon_metrics(),
-        scored_test_rows=len(dataset.test_rows) - (sequence_length - 1),
     )
     fake_model = _FakeSavedRnn()
     monkeypatch.setattr(rnn, "load_joblib", lambda _path: fake_model)

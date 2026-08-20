@@ -3,7 +3,7 @@
 import locale
 import math
 from collections.abc import Sequence
-from typing import Literal
+from typing import Literal, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -25,7 +25,14 @@ _CONTEXT_WINDOW_HOURS = 48
 # Hours of neighbouring issue times reachable from a forecast-window slider.
 _SLIDER_WINDOW_HOURS = 12
 
-type ComparisonPhase = Literal["cross_validation", "sealed_test"]
+type ComparisonPhase = Literal[
+    "cross_validation",
+    "sealed_test",
+    "sealed_test_quartile",
+    "sealed_test_alarm",
+]
+type BaseComparisonPhase = Literal["cross_validation", "sealed_test"]
+type RegimePhase = Literal["sealed_test_quartile", "sealed_test_alarm"]
 
 _COMPARISON_METRIC_TITLES = {
     "mae": "MAE",
@@ -33,6 +40,8 @@ _COMPARISON_METRIC_TITLES = {
     "me": "ME",
     "r2": "R²",
 }
+_REGIME_METRIC_TITLES = {"mae": "MAE", "rmse": "RMSE", "me": "ME"}
+_QUARTILE_REGIME_LABELS = ("Q1", "Q2", "Q3", "Q4")
 _COMPARISON_MODEL_COLORS = (
     "#636EFA",
     "#EF553B",
@@ -252,7 +261,7 @@ def aggregate_comparison_figure(
     Args:
         comparison_metrics: Canonical tidy comparison metrics from
             :func:`src.evaluation.load_latest_complete_comparison_metrics`.
-        phase: Either ``"cross_validation"`` or ``"sealed_test"``.
+        phase: A base comparison phase or one of the sealed-test regime phases.
 
     Returns:
         A four-panel model comparison. Cross-validation values include their
@@ -261,7 +270,15 @@ def aggregate_comparison_figure(
     Raises:
         ValueError: If required rows are absent, duplicated, or non-finite.
     """
-    rows = _comparison_plot_rows(comparison_metrics, phase=phase, scope="aggregate")
+    if phase in ("sealed_test_quartile", "sealed_test_alarm"):
+        return regime_comparison_figure(
+            comparison_metrics, phase=phase, scope="aggregate"
+        )
+    rows = _comparison_plot_rows(
+        comparison_metrics,
+        phase=cast(BaseComparisonPhase, phase),
+        scope="aggregate",
+    )
     models = rows["model"].drop_duplicates().astype(str).tolist()
     model_colors = _comparison_model_color_map(models)
     figure = make_subplots(
@@ -344,7 +361,7 @@ def horizon_comparison_figure(
     Args:
         comparison_metrics: Canonical tidy comparison metrics from
             :func:`src.evaluation.load_latest_complete_comparison_metrics`.
-        phase: Either ``"cross_validation"`` or ``"sealed_test"``.
+        phase: A base comparison phase or one of the sealed-test regime phases.
 
     Returns:
         A four-panel per-horizon model comparison. Cross-validation values
@@ -355,7 +372,15 @@ def horizon_comparison_figure(
         ValueError: If required rows are absent, duplicated, incomplete, or
             non-finite.
     """
-    rows = _comparison_plot_rows(comparison_metrics, phase=phase, scope="horizon")
+    if phase in ("sealed_test_quartile", "sealed_test_alarm"):
+        return regime_comparison_figure(
+            comparison_metrics, phase=phase, scope="horizon"
+        )
+    rows = _comparison_plot_rows(
+        comparison_metrics,
+        phase=cast(BaseComparisonPhase, phase),
+        scope="horizon",
+    )
     models = rows["model"].drop_duplicates().astype(str).tolist()
     model_colors = _comparison_model_color_map(models)
     horizons = sorted(rows["horizon"].astype(int).unique().tolist())
@@ -439,6 +464,290 @@ def horizon_comparison_figure(
         hovermode="x unified",
     )
     return figure
+
+
+def regime_comparison_figure(
+    comparison_metrics: pd.DataFrame,
+    *,
+    phase: RegimePhase = "sealed_test_quartile",
+    scope: Literal["aggregate", "horizon"] = "aggregate",
+) -> go.Figure:
+    """Compare sealed-test errors within water-level regimes.
+
+    The figure is deliberately descriptive: regime rows are never used by
+    training or candidate selection. Empty cells remain visible as gaps, which
+    is important for alarm-level subsets and sparse RNN cohorts.
+
+    Args:
+        comparison_metrics: Canonical tidy comparison metrics from
+            :func:`src.evaluation.load_latest_complete_comparison_metrics`.
+        phase: ``sealed_test_quartile`` or ``sealed_test_alarm``.
+        scope: Aggregate regime rows or per-horizon regime rows.
+
+    Returns:
+        A three-panel Plotly comparison for MAE, RMSE, and ME.
+
+    Raises:
+        ValueError: If the phase, scope, or required regime rows are invalid.
+    """
+    rows = _regime_plot_rows(comparison_metrics, phase=phase, scope=scope)
+    models = rows["model"].drop_duplicates().astype(str).tolist()
+    colors = _comparison_model_color_map(models)
+    regimes = _ordered_regimes(rows["regime"], phase=phase)
+    figure = make_subplots(
+        rows=1,
+        cols=3,
+        subplot_titles=list(_REGIME_METRIC_TITLES.values()),
+        shared_xaxes=scope == "aggregate" and phase == "sealed_test_alarm",
+    )
+    for column, metric in enumerate(_REGIME_METRIC_TITLES, start=1):
+        metric_rows = rows.loc[rows["metric"].eq(metric)]
+        for model in models:
+            model_rows = metric_rows.loc[metric_rows["model"].eq(model)].copy()
+            model_rows["__regime_order"] = model_rows["regime"].map(regimes.index)
+            model_rows = model_rows.sort_values("__regime_order", kind="stable")
+            # Plotly accepts NaN values and leaves a gap, allowing groups with
+            # count zero to be retained in the same compact comparison figure.
+            values = model_rows["value"].astype(float).to_numpy()
+            if scope == "aggregate" and phase == "sealed_test_alarm":
+                x_values = [model] * len(model_rows)
+                mode = "markers"
+            else:
+                x_values = [str(regime) for regime in model_rows["regime"]]
+                mode = "lines+markers"
+            customdata = np.column_stack(
+                [
+                    model_rows["regime"].astype(str),
+                    model_rows["scored_values"].astype("Int64").astype(str),
+                ]
+            )
+            figure.add_trace(
+                go.Scatter(
+                    x=x_values,
+                    y=values,
+                    mode=mode,
+                    name=model,
+                    legendgroup=model,
+                    showlegend=column == 1,
+                    line={"color": colors[model]},
+                    marker={"color": colors[model]},
+                    customdata=customdata,
+                    connectgaps=False,
+                    hovertemplate=(
+                        "Model=%{fullData.name}<br>Regime=%{customdata[0]}"
+                        "<br>Scored values=%{customdata[1]}<br>Value=%{y:.3f}"
+                        "<extra></extra>"
+                    ),
+                ),
+                row=1,
+                col=column,
+            )
+        figure.update_yaxes(title_text="Metric value", row=1, col=column)
+        if metric == "me":
+            figure.add_hline(
+                y=0.0,
+                line={"color": "black", "dash": "dash", "width": 1},
+                row=1,
+                col=column,
+            )
+        figure.update_xaxes(
+            categoryorder="array",
+            categoryarray=(models if phase == "sealed_test_alarm" else regimes),
+            tickangle=-20,
+            row=1,
+            col=column,
+        )
+    definition_label = (
+        "Q1–Q4 water-level regimes"
+        if phase == "sealed_test_quartile"
+        else "Alarm-level (actual ≥ configured threshold)"
+    )
+    scope_label = "aggregate" if scope == "aggregate" else "per horizon"
+    figure.update_layout(
+        title=f"Sealed-test regime comparison — {definition_label}, {scope_label}",
+        template="plotly_white",
+        height=450,
+        hovermode="closest",
+    )
+    return figure
+
+
+def quartile_comparison_figure(
+    comparison_metrics: pd.DataFrame,
+) -> go.Figure:
+    """Build the compact Q1–Q4 aggregate comparison figure."""
+    return regime_comparison_figure(
+        comparison_metrics, phase="sealed_test_quartile", scope="aggregate"
+    )
+
+
+def alarm_threshold_comparison_figure(
+    comparison_metrics: pd.DataFrame,
+) -> go.Figure:
+    """Build the separate aggregate comparison for the configured alarm level."""
+    return regime_comparison_figure(
+        comparison_metrics, phase="sealed_test_alarm", scope="aggregate"
+    )
+
+
+def quartile_horizon_small_multiples_figure(
+    comparison_metrics: pd.DataFrame,
+    *,
+    metric: Literal["mae", "rmse", "me"] = "mae",
+) -> go.Figure:
+    """Build Q1–Q4 per-horizon small multiples for one diagnostic metric.
+
+    Missing or empty cells are plotted as gaps; models are not required to have
+    the same regime cohort counts or finite values at every horizon.
+    """
+    if metric not in _REGIME_METRIC_TITLES:
+        raise ValueError(f"Unknown regime metric: {metric!r}")
+    rows = _regime_plot_rows(
+        comparison_metrics, phase="sealed_test_quartile", scope="horizon"
+    )
+    rows = rows.loc[rows["metric"].eq(metric)].copy()
+    models = (
+        comparison_metrics.loc[
+            comparison_metrics["phase"].eq("sealed_test_quartile"), "model"
+        ]
+        .drop_duplicates()
+        .astype(str)
+        .tolist()
+    )
+    if not models:
+        raise ValueError("No quartile models were found")
+    colors = _comparison_model_color_map(models)
+    regimes = list(_QUARTILE_REGIME_LABELS)
+    figure = make_subplots(
+        rows=2,
+        cols=2,
+        subplot_titles=regimes,
+        shared_xaxes=True,
+        shared_yaxes=True,
+    )
+    for index, regime in enumerate(regimes):
+        row_number = index // 2 + 1
+        column_number = index % 2 + 1
+        regime_rows = rows.loc[rows["regime"].eq(regime)]
+        for model in models:
+            model_rows = regime_rows.loc[regime_rows["model"].eq(model)].sort_values(
+                "horizon", kind="stable"
+            )
+            figure.add_trace(
+                go.Scatter(
+                    x=model_rows["horizon"].astype("Int64").astype(float),
+                    y=model_rows["value"].astype(float),
+                    mode="lines+markers",
+                    name=model,
+                    legendgroup=model,
+                    showlegend=index == 0,
+                    line={"color": colors[model]},
+                    marker={"color": colors[model]},
+                    connectgaps=False,
+                    hovertemplate=(
+                        "Model=%{fullData.name}<br>Horizon=%{x} h"
+                        "<br>Value=%{y:.3f}<extra></extra>"
+                    ),
+                ),
+                row=row_number,
+                col=column_number,
+            )
+        figure.update_xaxes(
+            dtick=1, title_text="Horizon (hours)", row=row_number, col=column_number
+        )
+        figure.update_yaxes(
+            title_text=_REGIME_METRIC_TITLES[metric], row=row_number, col=column_number
+        )
+    if metric == "me":
+        for index in range(4):
+            figure.add_hline(
+                y=0.0,
+                line={"color": "black", "dash": "dash", "width": 1},
+                row=index // 2 + 1,
+                col=index % 2 + 1,
+            )
+    figure.update_layout(
+        title=f"Sealed-test {metric.upper()} by horizon — Q1–Q4 small multiples",
+        template="plotly_white",
+        height=700,
+        hovermode="x unified",
+    )
+    return figure
+
+
+def alarm_threshold_horizon_figure(
+    comparison_metrics: pd.DataFrame,
+    *,
+    metric: Literal["mae", "rmse", "me"] = "mae",
+) -> go.Figure:
+    """Build the separate alarm-level per-horizon diagnostic view."""
+    if metric not in _REGIME_METRIC_TITLES:
+        raise ValueError(f"Unknown regime metric: {metric!r}")
+    rows = _regime_plot_rows(
+        comparison_metrics, phase="sealed_test_alarm", scope="horizon"
+    )
+    rows = rows.loc[rows["metric"].eq(metric)]
+    models = rows["model"].drop_duplicates().astype(str).tolist()
+    colors = _comparison_model_color_map(models)
+    figure = go.Figure()
+    for model in models:
+        model_rows = rows.loc[rows["model"].eq(model)].sort_values(
+            "horizon", kind="stable"
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=model_rows["horizon"].astype("Int64").astype(float),
+                y=model_rows["value"].astype(float),
+                mode="lines+markers",
+                name=model,
+                line={"color": colors[model]},
+                connectgaps=False,
+            )
+        )
+    if metric == "me":
+        figure.add_hline(
+            y=0.0,
+            line={"color": "black", "dash": "dash", "width": 1},
+        )
+    figure.update_layout(
+        title=f"Sealed-test alarm-level {metric.upper()} by horizon",
+        xaxis_title="Forecast horizon (hours)",
+        yaxis_title=_REGIME_METRIC_TITLES[metric],
+        template="plotly_white",
+        hovermode="x unified",
+    )
+    figure.update_xaxes(dtick=1)
+    return figure
+
+
+def regime_horizon_comparison_figure(
+    comparison_metrics: pd.DataFrame,
+    *,
+    phase: RegimePhase = "sealed_test_quartile",
+    metric: Literal["mae", "rmse", "me"] = "mae",
+) -> go.Figure:
+    """Dispatch to the quartile or alarm per-horizon diagnostic view."""
+    if phase == "sealed_test_quartile":
+        return quartile_horizon_small_multiples_figure(
+            comparison_metrics, metric=metric
+        )
+    if phase == "sealed_test_alarm":
+        return alarm_threshold_horizon_figure(comparison_metrics, metric=metric)
+    raise ValueError(f"Unknown regime phase: {phase!r}")
+
+
+def alarm_comparison_figure(comparison_metrics: pd.DataFrame) -> go.Figure:
+    """Alias for :func:`alarm_threshold_comparison_figure`."""
+    return alarm_threshold_comparison_figure(comparison_metrics)
+
+
+def quartile_horizon_comparison_figure(
+    comparison_metrics: pd.DataFrame,
+    *,
+    metric: Literal["mae", "rmse", "me"] = "mae",
+) -> go.Figure:
+    """Alias for :func:`quartile_horizon_small_multiples_figure`."""
+    return quartile_horizon_small_multiples_figure(comparison_metrics, metric=metric)
 
 
 def feature_subset_best_comparison_figure(
@@ -554,6 +863,149 @@ def feature_subset_best_comparison_figure(
         title="Best candidate within each feature subset — aggregate CV mean ± standard deviation",
         template="plotly_white",
         height=800,
+        hovermode="closest",
+    )
+    return figure
+
+
+def model_feature_subset_candidate_distribution_figure(
+    candidate_metrics: pd.DataFrame,
+    *,
+    model_name: str,
+    hover_columns: Sequence[str] = (),
+) -> go.Figure:
+    """Show one model's candidate-metric distributions by feature subset.
+
+    Each plotted point is the validation-fold mean for one hyperparameter
+    candidate. The boxes summarize the candidates within a feature subset; they
+    do not represent fold-to-fold uncertainty.
+
+    Args:
+        candidate_metrics: In-memory candidate results with ``subset`` and one
+            ``{metric}_mean`` column for each of MAE, RMSE, ME, and R².
+        model_name: Human-readable model name used in the figure title.
+        hover_columns: Additional candidate columns to include in point hover
+            details, such as feature count and hyperparameters.
+
+    Returns:
+        A four-panel Plotly box-plot figure containing every candidate.
+
+    Raises:
+        ValueError: If the model name, candidate rows, subsets, metrics, or hover
+            columns are invalid.
+    """
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise ValueError("model_name must be a non-empty string")
+
+    metric_columns = [f"{metric}_mean" for metric in _COMPARISON_METRIC_TITLES]
+    required_columns = ["subset", *metric_columns]
+    missing_columns = sorted(set(required_columns).difference(candidate_metrics))
+    if missing_columns:
+        raise ValueError(f"Candidate metrics are missing columns: {missing_columns}")
+    if candidate_metrics.empty:
+        raise ValueError("No candidate metric rows were found")
+
+    invalid_hover_columns = [
+        column
+        for column in hover_columns
+        if not isinstance(column, str) or column not in candidate_metrics.columns
+    ]
+    if invalid_hover_columns:
+        raise ValueError(
+            f"Requested hover columns are invalid: {invalid_hover_columns}"
+        )
+    if not np.isfinite(candidate_metrics[metric_columns].to_numpy(dtype=float)).all():
+        raise ValueError("Candidate metrics contain non-finite metric values")
+
+    subset_values = candidate_metrics["subset"]
+    invalid_subset_values = [
+        value
+        for value in subset_values.drop_duplicates().tolist()
+        if not isinstance(value, str) or not value or value not in _FEATURE_SUBSET_ORDER
+    ]
+    if subset_values.isna().any() or invalid_subset_values:
+        raise ValueError(
+            "Candidate subset names must be non-null established feature-subset "
+            f"names; invalid values: {invalid_subset_values}"
+        )
+
+    subsets = _ordered_feature_subsets(subset_values)
+    subset_colors = {
+        subset: _COMPARISON_MODEL_COLORS[index % len(_COMPARISON_MODEL_COLORS)]
+        for index, subset in enumerate(subsets)
+    }
+    subset_labels = [_feature_subset_label(subset) for subset in subsets]
+    figure = make_subplots(
+        rows=2,
+        cols=2,
+        subplot_titles=[
+            f"{title} candidate means" for title in _COMPARISON_METRIC_TITLES.values()
+        ],
+    )
+    for plot_number, metric in enumerate(_COMPARISON_METRIC_TITLES, start=1):
+        row = (plot_number - 1) // 2 + 1
+        column = (plot_number - 1) % 2 + 1
+        for subset in subsets:
+            subset_rows = candidate_metrics.loc[subset_values.eq(subset)]
+            customdata = (
+                subset_rows[list(hover_columns)].to_numpy(dtype=object)
+                if hover_columns
+                else None
+            )
+            hover_details = "".join(
+                f"<br>{hover_column}=%{{customdata[{index}]}}"
+                for index, hover_column in enumerate(hover_columns)
+            )
+            label = _feature_subset_label(subset)
+            figure.add_trace(
+                go.Box(
+                    x=[label] * len(subset_rows),
+                    y=subset_rows[f"{metric}_mean"].to_numpy(dtype=float),
+                    name=label.replace("<br>", " "),
+                    legendgroup=subset,
+                    showlegend=plot_number == 1,
+                    boxpoints="all",
+                    jitter=0.25,
+                    pointpos=0,
+                    marker={
+                        "color": subset_colors[subset],
+                        "size": 6,
+                        "opacity": 0.7,
+                    },
+                    line={"color": subset_colors[subset]},
+                    customdata=customdata,
+                    hovertemplate=(
+                        f"Model={model_name}<br>Subset={subset}"
+                        "<br>Candidate CV mean=%{y:.4f}"
+                        f"{hover_details}<extra></extra>"
+                    ),
+                ),
+                row=row,
+                col=column,
+            )
+        figure.update_xaxes(
+            categoryorder="array",
+            categoryarray=subset_labels,
+            tickangle=-20,
+            row=row,
+            col=column,
+        )
+        figure.update_yaxes(title_text="Candidate CV mean", row=row, col=column)
+        if metric == "me":
+            figure.add_hline(
+                y=0.0,
+                line={"color": "black", "dash": "dash", "width": 1},
+                row=row,
+                col=column,
+            )
+    figure.update_layout(
+        title=(
+            f"{model_name} performance across feature subsets — "
+            "hyperparameter-candidate distributions (not fold uncertainty)"
+        ),
+        template="plotly_white",
+        height=800,
+        boxmode="group",
         hovermode="closest",
     )
     return figure
@@ -747,7 +1199,7 @@ def _comparison_model_color_map(models: Sequence[str]) -> dict[str, str]:
 def _comparison_plot_rows(
     comparison_metrics: pd.DataFrame,
     *,
-    phase: ComparisonPhase,
+    phase: BaseComparisonPhase,
     scope: Literal["aggregate", "horizon"],
 ) -> pd.DataFrame:
     """Validate and return canonical comparison rows for a figure."""
@@ -789,6 +1241,94 @@ def _comparison_plot_rows(
     if scope == "horizon" and rows["horizon"].isna().any():
         raise ValueError("Horizon comparison rows must have integer horizons")
     return rows
+
+
+def _regime_plot_rows(
+    comparison_metrics: pd.DataFrame,
+    *,
+    phase: RegimePhase,
+    scope: Literal["aggregate", "horizon"],
+) -> pd.DataFrame:
+    """Validate and return sparse-safe sealed-test regime rows."""
+    if phase not in ("sealed_test_quartile", "sealed_test_alarm"):
+        raise ValueError(f"Unknown regime phase: {phase!r}")
+    comparison_metrics = comparison_metrics.copy()
+    for canonical, fallbacks in (
+        ("lower_bound_cm", ("regime_lower_bound_cm",)),
+        ("upper_bound_cm", ("regime_upper_bound_cm",)),
+        (
+            "scored_values",
+            ("scored_value_count", "scored_forecast_values", "regime_count"),
+        ),
+    ):
+        if canonical not in comparison_metrics:
+            for fallback in fallbacks:
+                if fallback in comparison_metrics:
+                    comparison_metrics[canonical] = comparison_metrics[fallback]
+                    break
+    required_columns = {
+        "model",
+        "phase",
+        "metric",
+        "scope",
+        "horizon",
+        "value",
+        "regime",
+        "lower_bound_cm",
+        "upper_bound_cm",
+        "scored_values",
+    }
+    missing_columns = sorted(required_columns.difference(comparison_metrics.columns))
+    if missing_columns:
+        raise ValueError(f"Comparison metrics are missing columns: {missing_columns}")
+    rows = comparison_metrics.loc[
+        comparison_metrics["phase"].eq(phase)
+        & comparison_metrics["scope"].eq(scope)
+        & comparison_metrics["metric"].isin(_REGIME_METRIC_TITLES)
+    ].copy()
+    if rows.empty:
+        raise ValueError(f"No {phase} {scope} comparison rows were found")
+    if rows[["model", "regime", "metric"]].isna().any(axis=None):
+        raise ValueError("Regime model, label, and metric values must be non-null")
+    if rows.duplicated(["model", "regime", "metric", "horizon"]).any():
+        raise ValueError("Regime comparison rows duplicate a model/regime/metric")
+    numeric_values = (
+        rows["value"].astype("Float64").to_numpy(dtype=float, na_value=np.nan)
+    )
+    if np.isinf(numeric_values).any():
+        raise ValueError("Regime metric values contain infinite values")
+    counts = (
+        rows["scored_values"].astype("Float64").to_numpy(dtype=float, na_value=np.nan)
+    )
+    if not np.isfinite(counts).all() or (counts < 0).any() or (counts % 1 != 0).any():
+        raise ValueError("Regime scored-value counts must be non-negative integers")
+    bounds = (
+        rows[["lower_bound_cm", "upper_bound_cm"]]
+        .astype("Float64")
+        .to_numpy(dtype=float, na_value=np.nan)
+    )
+    if np.isinf(bounds).any():
+        raise ValueError("Regime bounds contain infinite values")
+    if scope == "aggregate" and rows["horizon"].notna().any():
+        raise ValueError("Aggregate regime rows must have null horizons")
+    if scope == "horizon" and rows["horizon"].isna().any():
+        raise ValueError("Horizon regime rows must have integer horizons")
+    rows["value"] = rows["value"].astype("Float64")
+    rows["scored_values"] = rows["scored_values"].astype("Int64")
+    rows["lower_bound_cm"] = rows["lower_bound_cm"].astype("Float64")
+    rows["upper_bound_cm"] = rows["upper_bound_cm"].astype("Float64")
+    return rows
+
+
+def _ordered_regimes(regimes: pd.Series, *, phase: RegimePhase) -> list[str]:
+    """Return stable labels, retaining observed non-standard regime names."""
+    observed = regimes.drop_duplicates().astype(str).tolist()
+    preferred = (
+        list(_QUARTILE_REGIME_LABELS) if phase == "sealed_test_quartile" else ["Alarm"]
+    )
+    return [regime for regime in preferred if regime in observed] + [
+        regime for regime in observed if regime not in preferred
+    ]
 
 
 def _error_boxplots_figure(

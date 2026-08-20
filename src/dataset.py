@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,10 @@ class JoinedDataset:
         raw_row_counts: Row counts of the unfiltered train and test artifacts.
         target_context_series: Timestamp-indexed target-station water level and
             imputation flag across both artifacts.
+        target_water_level_quartile_cutoffs_cm: Training-reference Q25, Q50,
+            and Q75 target water-level cutoffs in centimetres.
+        target_water_level_quartile_reference_count: Number of finite,
+            non-imputed training measurements used for the quartiles.
     """
 
     contract: JoinedFeatureContract
@@ -54,6 +59,8 @@ class JoinedDataset:
     input_hashes: dict[str, str]
     raw_row_counts: dict[str, int]
     target_context_series: pd.DataFrame
+    target_water_level_quartile_cutoffs_cm: tuple[float, float, float]
+    target_water_level_quartile_reference_count: int
 
 
 def load_joined_dataset(
@@ -109,13 +116,20 @@ def load_joined_dataset(
         n_validation_folds=n_validation_folds,
         embargo_rows=embargo_rows,
     )
+    feature_subsets = _build_feature_subsets(
+        contract, weather_variables=weather_variables
+    )
+    target_context_series = _target_context_series(
+        train_features, test_features, contract
+    )
+    quartile_cutoffs, quartile_reference_count = _target_water_level_quartile_summary(
+        train_features, contract
+    )
     return JoinedDataset(
         contract=contract,
         train_rows=train_rows,
         test_rows=test_rows,
-        feature_subsets=_build_feature_subsets(
-            contract, weather_variables=weather_variables
-        ),
+        feature_subsets=feature_subsets,
         folds=folds,
         validation_test_size=validation_test_size,
         input_hashes={
@@ -123,9 +137,9 @@ def load_joined_dataset(
             "test_input_sha256": _sha256_file(test_path),
         },
         raw_row_counts={"train": len(train_features), "test": len(test_features)},
-        target_context_series=_target_context_series(
-            train_features, test_features, contract
-        ),
+        target_context_series=target_context_series,
+        target_water_level_quartile_cutoffs_cm=quartile_cutoffs,
+        target_water_level_quartile_reference_count=quartile_reference_count,
     )
 
 
@@ -426,6 +440,70 @@ def _target_context_series(
         .set_index("timestamp")
         .sort_index()
     )
+
+
+def _target_water_level_quartile_summary(
+    train_features: pd.DataFrame,
+    contract: JoinedFeatureContract,
+) -> tuple[tuple[float, float, float], int]:
+    """Calculate training-reference target water-level quartile cutoffs.
+
+    The reference population is deliberately independent of the model cohort:
+    it uses every finite, non-imputed target-station water-level measurement in
+    the unfiltered training artifact, including rows that are later excluded
+    from modelling because another feature or target is incomplete.
+
+    Args:
+        train_features: Unfiltered joined training feature artifact.
+        contract: Validated joined-feature contract.
+
+    Returns:
+        The Q25, Q50, and Q75 cutoffs in centimetres and the number of reference
+        measurements used to calculate them.
+
+    Raises:
+        ValueError: If the target-station context columns are missing, no valid
+            reference measurements exist, or the resulting cutoffs are not
+            finite and ordered.
+    """
+    water_level_column = f"{contract.station_id}__water_level"
+    imputed_column = f"{contract.station_id}__imputed"
+    missing = sorted(
+        {water_level_column, imputed_column}.difference(train_features.columns)
+    )
+    if missing:
+        raise ValueError(
+            f"The training artifact is missing target-station context columns: "
+            f"{missing}"
+        )
+
+    water_levels = pd.to_numeric(
+        train_features[water_level_column], errors="coerce"
+    ).to_numpy(dtype=float)
+    non_imputed = (
+        train_features[imputed_column].eq(False).fillna(False).to_numpy(dtype=bool)
+    )
+    reference_values = water_levels[np.isfinite(water_levels) & non_imputed]
+    reference_count = int(reference_values.size)
+    if reference_count == 0:
+        raise ValueError(
+            "The training artifact has no finite, non-imputed target water-level "
+            "measurements"
+        )
+
+    cutoffs_array = np.quantile(reference_values, [0.25, 0.50, 0.75])
+    cutoffs: tuple[float, float, float] = (
+        float(cutoffs_array[0]),
+        float(cutoffs_array[1]),
+        float(cutoffs_array[2]),
+    )
+    if not all(np.isfinite(cutoff) for cutoff in cutoffs) or any(
+        lower > upper for lower, upper in pairwise(cutoffs)
+    ):
+        raise ValueError(
+            "Target water-level quartile cutoffs must be finite and ordered"
+        )
+    return cutoffs, reference_count
 
 
 def _sha256_file(path: Path) -> str:

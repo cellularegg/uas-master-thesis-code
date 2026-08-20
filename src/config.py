@@ -67,6 +67,15 @@ TEST_FRACTION = 0.20
 # Minimum target-range overlap required to retain a non-target station.
 MIN_TARGET_RANGE_OVERLAP = 0.90
 
+# Post-hoc alarm diagnostic configuration.  This is a versioned snapshot of
+# PegelAlarm's ``defaultAlarmValueCm`` metadata for the target station; it is
+# not an official flood-warning threshold and is intentionally not fetched at
+# runtime.
+WATER_LEVEL_ALARM_CONFIG_VERSION = 1
+WATER_LEVEL_ALARM_THRESHOLD_STATION_ID = "207241-at"
+WATER_LEVEL_ALARM_THRESHOLD_CM = 545.0
+WATER_LEVEL_ALARM_THRESHOLD_SOURCE = "PegelAlarm defaultAlarmValueCm"
+
 # Matplotlib style supplying the figure colour palette (colour-vision-friendly).
 MATPLOTLIB_STYLE = "petroff10"
 # Root of the sibling LaTeX thesis repository that consumes exported artifacts.

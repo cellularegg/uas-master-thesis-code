@@ -272,6 +272,7 @@ def _write_feature_artifacts(root: Path) -> JoinedDataset:
     )
     for number, column in enumerate(predictor_columns, start=1):
         frame[column] = number + np.arange(len(frame), dtype=float)
+    frame[f"{station_id}__imputed"] = False
     for horizon, column in enumerate(target_columns, start=1):
         frame[column] = 10.0 * np.arange(len(frame), dtype=float) + horizon
     train_path = processed_dir / "all_stations_train_features.parquet"
@@ -318,30 +319,11 @@ def _cv_results(selected_subset: str) -> pd.DataFrame:
     )
 
 
-def _per_horizon_metrics() -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "station_id": TARGET_STATION_ID,
-                "horizon_hours": horizon,
-                "target": f"target_{horizon:02d}",
-                "mae": 1.0 + horizon,
-                "rmse": 2.0 + horizon,
-                "me": 0.25,
-                "r2": 0.75,
-            }
-            for horizon in range(1, FORECAST_HORIZON_HOURS + 1)
-        ]
-    )
-
-
 def _save(
     dataset: JoinedDataset,
     manifest_path: Path,
     *,
     selected_subset: str = "current_water_levels_all_stations",
-    sealed_test_metrics: dict[str, float] | None = None,
-    per_horizon_metrics: pd.DataFrame | None = None,
     bootstrap: bool = False,
 ) -> None:
     save_extra_trees_manifest(
@@ -356,25 +338,6 @@ def _save(
         selected_min_samples_leaf=4,
         selected_max_features="sqrt",
         bootstrap=bootstrap,
-        selection_metric="rmse",
-        cv_results=_cv_results("current_water_levels_all_stations"),
-        sealed_test_metrics=(
-            {
-                "test_mae": 1.0,
-                "test_rmse": 2.0,
-                "test_me": 0.25,
-                "test_r2": 0.75,
-            }
-            if sealed_test_metrics is None
-            else sealed_test_metrics
-        ),
-        per_horizon_metrics=(
-            _per_horizon_metrics()
-            if per_horizon_metrics is None
-            else per_horizon_metrics
-        ),
-        cohort={"train_eligible_rows": len(dataset.train_rows)},
-        training={"source_artifact": "train.parquet"},
     )
 
 
@@ -390,7 +353,20 @@ def test_extra_trees_manifest_round_trips_nullable_parameters(tmp_path: Path) ->
     )
 
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert stored["schema_version"] == "1.0"
+    assert stored["schema_version"] == "3.0"
+    assert not {
+        "selection_metric",
+        "tie_breaking",
+        "full_feature_columns",
+        "feature_subsets",
+        "cv_results",
+        "sealed_test_metrics",
+        "horizon_metrics",
+        "regime_definition",
+        "regime_metrics",
+        "common_cohort_eligibility",
+        "training",
+    }.intersection(stored)
     assert stored["selected_max_depth"] is None
     assert manifest.selected_max_depth is None
     assert manifest.selected_n_estimators == 200
@@ -398,7 +374,6 @@ def test_extra_trees_manifest_round_trips_nullable_parameters(tmp_path: Path) ->
     assert manifest.selected_max_features == "sqrt"
     assert stored["bootstrap"] is False
     assert manifest.bootstrap is False
-    assert manifest.horizon_metrics["test_mae"].iloc[0] == 2.0
 
 
 def test_load_extra_trees_manifest_reports_missing_manifest(tmp_path: Path) -> None:
@@ -427,39 +402,6 @@ def test_load_extra_trees_manifest_rejects_an_older_schema_version(
             contract=dataset.contract,
             feature_subsets=dataset.feature_subsets,
         )
-
-
-def test_save_extra_trees_manifest_rejects_invalid_test_records(
-    tmp_path: Path,
-) -> None:
-    dataset = _write_feature_artifacts(tmp_path)
-    manifest_path = tmp_path / "extra_trees.json"
-    with pytest.raises(ValueError, match="Sealed-test metrics are missing"):
-        _save(dataset, manifest_path, sealed_test_metrics={"test_mae": 1.0})
-    with pytest.raises(ValueError, match="non-finite"):
-        _save(
-            dataset,
-            manifest_path,
-            sealed_test_metrics={
-                "test_mae": np.nan,
-                "test_rmse": 2.0,
-                "test_me": 0.25,
-                "test_r2": 0.75,
-            },
-        )
-    with pytest.raises(ValueError, match="do not match the forecast contract"):
-        _save(
-            dataset,
-            manifest_path,
-            per_horizon_metrics=_per_horizon_metrics().iloc[:-1],
-        )
-    with pytest.raises(ValueError, match="missing columns"):
-        _save(
-            dataset,
-            manifest_path,
-            per_horizon_metrics=_per_horizon_metrics().drop(columns="r2"),
-        )
-    assert not manifest_path.exists()
 
 
 def test_save_extra_trees_manifest_rejects_unknown_selected_subset(
@@ -498,7 +440,6 @@ def test_extra_trees_manifest_rejects_contract_mismatches(tmp_path: Path) -> Non
     for field, value, message in (
         ("station_id", "other-station", "station_id"),
         ("forecast_horizon_hours", FORECAST_HORIZON_HOURS + 1, "forecast horizon"),
-        ("full_feature_columns", ["only-one"], "full feature contract"),
         ("target_columns", ["only-one"], "target contract"),
         ("selected_subset", "unknown-subset", "selected subset"),
         ("selected_feature_columns", ["only-one"], "selected features"),

@@ -127,6 +127,7 @@ def _write_feature_artifacts(root: Path) -> JoinedDataset:
     )
     for predictor_number, column in enumerate(predictor_columns, start=1):
         frame[column] = predictor_number + np.arange(len(frame), dtype=float)
+    frame[f"{station_id}__imputed"] = False
     for horizon, column in enumerate(target_columns, start=1):
         frame[column] = 10.0 * np.arange(len(frame), dtype=float) + horizon
     train_path = processed_dir / "all_stations_train_features.parquet"
@@ -169,31 +170,12 @@ def _cv_results(selected_subset: str) -> pd.DataFrame:
     )
 
 
-def _per_horizon_metrics(horizons: int = FORECAST_HORIZON_HOURS) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "station_id": TARGET_STATION_ID,
-                "horizon_hours": horizon,
-                "target": f"target_{horizon:02d}",
-                "mae": 1.0 + horizon,
-                "rmse": 2.0 + horizon,
-                "me": 0.25,
-                "r2": 0.75,
-            }
-            for horizon in range(1, horizons + 1)
-        ]
-    )
-
-
 def _save(
     dataset: JoinedDataset,
     manifest_path: Path,
     *,
     selected_subset: str = "current_water_levels_all_stations",
     selected_log1p: bool = False,
-    per_horizon_metrics: pd.DataFrame | None = None,
-    sealed_test_metrics: dict[str, float] | None = None,
 ) -> None:
     save_ridge_manifest(
         manifest_path,
@@ -204,21 +186,10 @@ def _save(
         selected_subset=selected_subset,
         selected_alpha=0.1,
         selected_log1p=selected_log1p,
-        selection_metric="rmse",
-        cv_results=_cv_results(selected_subset),
-        sealed_test_metrics=sealed_test_metrics
-        or {"test_mae": 1.0, "test_rmse": 2.0, "test_me": 0.25, "test_r2": 0.75},
-        per_horizon_metrics=(
-            _per_horizon_metrics()
-            if per_horizon_metrics is None
-            else per_horizon_metrics
-        ),
-        cohort={"train_eligible_rows": len(dataset.train_rows)},
-        training={"source_artifact": "train.parquet"},
     )
 
 
-def test_ridge_manifest_round_trips_the_selection_and_sealed_test_record(
+def test_ridge_manifest_round_trips_the_model_contract(
     tmp_path: Path,
 ) -> None:
     dataset = _write_feature_artifacts(tmp_path)
@@ -232,37 +203,29 @@ def test_ridge_manifest_round_trips_the_selection_and_sealed_test_record(
     )
 
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert stored["schema_version"] == "3.0"
-    assert stored["tie_breaking"][0] == "lowest aggregate CV RMSE"
-    assert stored["tie_breaking"][2] == "log1p=False preferred"
+    assert stored["schema_version"] == "5.0"
+    assert not {
+        "selection_metric",
+        "tie_breaking",
+        "full_feature_columns",
+        "feature_subsets",
+        "cv_results",
+        "sealed_test_metrics",
+        "horizon_metrics",
+        "regime_definition",
+        "regime_metrics",
+        "common_cohort_eligibility",
+        "training",
+    }.intersection(stored)
     assert stored["selected_log1p"] is False
-    assert all(isinstance(record["log1p"], bool) for record in stored["cv_results"])
     assert manifest.execution_uuid == "execution-1"
     assert manifest.selected_subset == "current_water_levels_all_stations"
     assert manifest.selected_alpha == 0.1
     assert manifest.selected_log1p is False
-    assert manifest.selection_metric == "rmse"
     assert manifest.selected_feature_columns == tuple(
         dataset.feature_subsets["current_water_levels_all_stations"]
     )
     assert manifest.target_columns == dataset.contract.target_columns
-    assert manifest.cv_results["subset"].tolist() == [
-        "current_water_levels_all_stations",
-        "full",
-    ]
-    assert manifest.sealed_test_metrics == {
-        "test_mae": 1.0,
-        "test_rmse": 2.0,
-        "test_me": 0.25,
-        "test_r2": 0.75,
-    }
-    assert manifest.horizon_metrics["horizon_hours"].tolist() == list(
-        range(1, FORECAST_HORIZON_HOURS + 1)
-    )
-    assert manifest.horizon_metrics["test_mae"].iloc[0] == 2.0
-    assert (
-        manifest.horizon_metrics["test_rmse"].iloc[-1] == 2.0 + FORECAST_HORIZON_HOURS
-    )
 
 
 def test_load_ridge_manifest_reports_missing_manifest(tmp_path: Path) -> None:
@@ -304,7 +267,6 @@ def test_load_ridge_manifest_rejects_contract_mismatches(tmp_path: Path) -> None
     for field, value, message in (
         ("station_id", "other-station", "station_id"),
         ("forecast_horizon_hours", FORECAST_HORIZON_HOURS + 1, "forecast horizon"),
-        ("full_feature_columns", ["only-one"], "full feature contract"),
         ("target_columns", ["only-one"], "target contract"),
         ("selected_subset", "unknown-subset", "selected subset"),
         ("selected_feature_columns", ["only-one"], "selected features"),
@@ -316,39 +278,6 @@ def test_load_ridge_manifest_rejects_contract_mismatches(tmp_path: Path) -> None
                 contract=dataset.contract,
                 feature_subsets=dataset.feature_subsets,
             )
-
-
-def test_save_ridge_manifest_rejects_an_incomplete_sealed_test_record(
-    tmp_path: Path,
-) -> None:
-    dataset = _write_feature_artifacts(tmp_path)
-    manifest_path = tmp_path / "ridge.json"
-
-    with pytest.raises(ValueError, match="Sealed-test metrics are missing"):
-        _save(
-            dataset,
-            manifest_path,
-            sealed_test_metrics={"test_mae": 1.0, "test_rmse": 2.0},
-        )
-    with pytest.raises(ValueError, match="non-finite"):
-        _save(
-            dataset,
-            manifest_path,
-            sealed_test_metrics={
-                "test_mae": float("nan"),
-                "test_rmse": 2.0,
-                "test_me": 0.25,
-                "test_r2": 0.75,
-            },
-        )
-    with pytest.raises(ValueError, match="do not match the forecast contract"):
-        _save(
-            dataset,
-            manifest_path,
-            per_horizon_metrics=_per_horizon_metrics(FORECAST_HORIZON_HOURS - 1),
-        )
-    # Nothing is written until every check passes.
-    assert not manifest_path.exists()
 
 
 def test_save_ridge_manifest_rejects_an_unknown_selected_subset(

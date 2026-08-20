@@ -90,6 +90,8 @@ def _write_artifacts(
         )
         for predictor_number, column in enumerate(predictor_columns, start=1):
             built[column] = predictor_number + np.arange(row_count, dtype=float)
+            if column.endswith("__imputed"):
+                built[column] = False
         for horizon, column in enumerate(target_columns, start=1):
             built[column] = 10.0 * np.arange(row_count, dtype=float) + horizon
         if null_target_on_valid_row:
@@ -151,6 +153,10 @@ def test_load_joined_dataset_builds_the_contract_cohorts_and_provenance(
     assert len(dataset.train_rows) == 20
     assert len(dataset.test_rows) == 6
     assert dataset.raw_row_counts == {"train": 20, "test": 6}
+    assert dataset.target_water_level_quartile_cutoffs_cm == pytest.approx(
+        (5.75, 10.5, 15.25)
+    )
+    assert dataset.target_water_level_quartile_reference_count == 20
     # The train artifact is written newest-first, so ordering is not incidental.
     assert dataset.train_rows["timestamp"].is_monotonic_increasing
     assert dataset.train_rows.index.tolist() == list(range(20))
@@ -284,6 +290,27 @@ def test_load_joined_dataset_builds_the_target_context_series(tmp_path: Path) ->
     # Both artifacts contribute, and every timestamp appears exactly once.
     assert len(context) == 26
     assert not context.index.has_duplicates
+
+
+def test_load_joined_dataset_quartiles_use_unfiltered_finite_non_imputed_train_values(
+    tmp_path: Path,
+) -> None:
+    paths = _write_artifacts(tmp_path, train_rows=8, test_rows=4)
+    train = pd.read_parquet(paths[1])
+    water_level = "station-a__water_level"
+    imputed = "station-a__imputed"
+    train[water_level] = [100.0, 200.0, np.nan, np.inf, 300.0, 400.0, 500.0, 600.0]
+    train.loc[4, imputed] = True
+    # The null/inf and imputed rows remain in the raw artifact but are excluded
+    # from the training-reference population.
+    train.to_parquet(paths[1], index=False)
+
+    dataset = _load(paths, initial_train_fraction=0.5, n_validation_folds=2)
+
+    assert dataset.target_water_level_quartile_reference_count == 5
+    assert dataset.target_water_level_quartile_cutoffs_cm == pytest.approx(
+        (200.0, 400.0, 500.0)
+    )
 
 
 def test_load_joined_dataset_rejects_metadata_horizon_mismatch(tmp_path: Path) -> None:

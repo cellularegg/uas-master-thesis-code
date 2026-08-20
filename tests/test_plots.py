@@ -9,12 +9,17 @@ import pytest
 from src import plots
 from src.plots import (
     aggregate_comparison_figure,
+    alarm_threshold_comparison_figure,
+    alarm_threshold_horizon_figure,
     cv_error_boxplots_figure,
     feature_subset_best_comparison_figure,
     feature_subset_candidate_distribution_figure,
     forecast_window_figures,
     horizon_comparison_figure,
+    model_feature_subset_candidate_distribution_figure,
     predicted_vs_actual_figure,
+    quartile_comparison_figure,
+    quartile_horizon_small_multiples_figure,
 )
 
 # `plots.test_error_boxplots_figure` is reached through the module so pytest does
@@ -79,6 +84,27 @@ def _feature_subset_metrics() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _model_candidate_metrics() -> pd.DataFrame:
+    rows = []
+    for subset_number, subset in enumerate(
+        ("target_station_full", "full", "raw_all_stations"), start=1
+    ):
+        for candidate_number in (1, 2):
+            row: dict[str, object] = {
+                "subset": subset,
+                "feature_count": subset_number * 10,
+                "alpha": candidate_number / 10,
+            }
+            for metric_number, metric in enumerate(
+                ("mae", "rmse", "me", "r2"), start=1
+            ):
+                row[f"{metric}_mean"] = float(
+                    subset_number + candidate_number + metric_number
+                )
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
 @pytest.mark.parametrize(
     "builder", [aggregate_comparison_figure, horizon_comparison_figure]
 )
@@ -125,6 +151,66 @@ def test_horizon_comparison_figure_uses_same_grid_interval_in_every_panel() -> N
     )
 
 
+def _regime_metrics() -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for model in ("Persistence", "RNN"):
+        for phase, regimes in (
+            ("sealed_test_quartile", ("Q1", "Q2", "Q3", "Q4")),
+            ("sealed_test_alarm", ("Alarm",)),
+        ):
+            for regime in regimes:
+                for scope in ("aggregate", "horizon"):
+                    horizons = (None,) if scope == "aggregate" else (1, 2)
+                    for horizon in horizons:
+                        for metric in ("mae", "rmse", "me"):
+                            empty = model == "RNN" and regime == "Q4"
+                            rows.append(
+                                {
+                                    "model": model,
+                                    "phase": phase,
+                                    "scope": scope,
+                                    "horizon": horizon,
+                                    "metric": metric,
+                                    "value": np.nan if empty else 1.0,
+                                    "cv_std": pd.NA,
+                                    "regime": regime,
+                                    "lower_bound_cm": pd.NA,
+                                    "upper_bound_cm": pd.NA,
+                                    "scored_values": 0 if empty else 2,
+                                }
+                            )
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [quartile_comparison_figure, alarm_threshold_comparison_figure],
+)
+def test_regime_comparison_figures_keep_sparse_cells(builder: object) -> None:
+    figure = builder(_regime_metrics())  # type: ignore[operator]
+
+    assert isinstance(figure, go.Figure)
+    assert len(figure.layout.annotations) == 3
+    assert len(figure.data) == 2 * 3
+    if builder is quartile_comparison_figure:
+        assert any(np.isnan(value) for trace in figure.data for value in trace.y)
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [quartile_horizon_small_multiples_figure, alarm_threshold_horizon_figure],
+)
+def test_regime_horizon_figures_support_different_cohorts(builder: object) -> None:
+    figure = builder(_regime_metrics())  # type: ignore[operator]
+
+    assert isinstance(figure, go.Figure)
+    assert (
+        len(figure.data) == 8
+        if builder is quartile_horizon_small_multiples_figure
+        else 2
+    )
+
+
 def test_feature_subset_best_figure_uses_one_winner_per_model_and_subset() -> None:
     comparison_metrics = _comparison_metrics()
     figure = feature_subset_best_comparison_figure(
@@ -167,6 +253,86 @@ def test_feature_subset_candidate_distribution_shows_every_candidate() -> None:
     assert all(trace.type == "scatter" for trace in baseline_traces)
     assert all(trace.line.dash == "dash" for trace in baseline_traces)
     assert figure.layout.boxmode == "group"
+
+
+def test_model_feature_subset_candidate_distribution_shows_every_candidate() -> None:
+    metrics = _model_candidate_metrics()
+
+    figure = model_feature_subset_candidate_distribution_figure(
+        metrics,
+        model_name="Ridge",
+        hover_columns=("feature_count", "alpha"),
+    )
+
+    assert isinstance(figure, go.Figure)
+    assert [annotation.text for annotation in figure.layout.annotations] == [
+        "MAE candidate means",
+        "RMSE candidate means",
+        "ME candidate means",
+        "R² candidate means",
+    ]
+    assert len(figure.data) == 3 * 4
+    expected_trace_names = [
+        "Full",
+        "Raw, all stations",
+        "Target-station full",
+    ]
+    for panel_number in range(4):
+        panel_traces = figure.data[panel_number * 3 : (panel_number + 1) * 3]
+        assert [trace.name for trace in panel_traces] == expected_trace_names
+        assert sum(len(trace.y) for trace in panel_traces) == len(metrics)
+        assert all(trace.type == "box" for trace in panel_traces)
+        assert all(trace.boxpoints == "all" for trace in panel_traces)
+    assert list(figure.layout.xaxis.categoryarray) == [
+        "Full",
+        "Raw,<br>all stations",
+        "Target-station<br>full",
+    ]
+    assert len(figure.layout.shapes) == 1
+    assert figure.layout.shapes[0].y0 == 0.0
+    assert figure.layout.shapes[0].y1 == 0.0
+    assert "not fold uncertainty" in figure.layout.title.text
+
+    first_trace = figure.data[0]
+    assert "feature_count=%{customdata[0]}" in first_trace.hovertemplate
+    assert "alpha=%{customdata[1]}" in first_trace.hovertemplate
+    assert first_trace.customdata.tolist() == [[20, 0.1], [20, 0.2]]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error_match"),
+    [
+        (lambda frame: frame.drop(columns="r2_mean"), "missing columns"),
+        (
+            lambda frame: frame.assign(rmse_mean=np.inf),
+            "non-finite metric values",
+        ),
+        (
+            lambda frame: frame.assign(subset="not_a_feature_subset"),
+            "subset names",
+        ),
+    ],
+)
+def test_model_feature_subset_candidate_distribution_rejects_invalid_rows(
+    mutation: object,
+    error_match: str,
+) -> None:
+    with pytest.raises(ValueError, match=error_match):
+        model_feature_subset_candidate_distribution_figure(
+            mutation(_model_candidate_metrics()),  # type: ignore[operator]
+            model_name="Ridge",
+        )
+
+
+def test_model_feature_subset_candidate_distribution_rejects_invalid_hover_column() -> (
+    None
+):
+    with pytest.raises(ValueError, match="hover columns"):
+        model_feature_subset_candidate_distribution_figure(
+            _model_candidate_metrics(),
+            model_name="Ridge",
+            hover_columns=("missing_parameter",),
+        )
 
 
 def test_predicted_vs_actual_figure_shows_each_horizon_and_combined_values() -> None:

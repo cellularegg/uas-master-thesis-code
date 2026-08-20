@@ -234,8 +234,9 @@ pipeline input.
 Every fitted-model notebook writes
 `models/<model>_{TARGET_STATION_ID}.joblib` plus a sibling JSON manifest only
 after sealed-test scoring succeeds. The manifest is the durable
-execution record: it stores the selected candidate, ordered feature/channel and
-target contracts, complete realized CV table, sealed-test metrics, cohort and
-training provenance, and model path. Manifest loaders validate these fields
+model description: it stores the estimator/preprocessor identity, selected
+hyperparameters, ordered feature/channel and target contracts, model path, and
+`execution_uuid`. CV, sealed-test, regime, cohort, and training diagnostics stay
+in MLflow rather than the manifest. Manifest loaders validate the model contract
 against the current feature metadata and subset definitions before a saved model
 can be rescored. Persistence has no fitted model or manifest.

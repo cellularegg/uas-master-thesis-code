@@ -3,6 +3,7 @@
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Literal
 
 import numpy as np
@@ -12,7 +13,12 @@ from mlflow.tracking import MlflowClient
 
 from src.config import FORECAST_HORIZON_HOURS
 
-type EvaluationPhase = Literal["cross_validation", "sealed_test"]
+type EvaluationPhase = Literal[
+    "cross_validation",
+    "sealed_test",
+    "sealed_test_quartile",
+    "sealed_test_alarm",
+]
 
 METRIC_NAMES = ("mae", "rmse", "me", "r2")
 MODEL_EXPERIMENTS: dict[str, str] = {
@@ -40,6 +46,10 @@ COMPARISON_METRICS_COLUMNS = [
     "forecast_horizon_hours",
     "cohort_row_count",
     "cohort_size_differs",
+    "regime",
+    "lower_bound_cm",
+    "upper_bound_cm",
+    "scored_values",
 ]
 FEATURE_SUBSET_CV_COLUMNS = [
     "model",
@@ -116,6 +126,16 @@ class _CompleteExecution:
     test_input_sha256: str
     forecast_horizon_hours: int
     cohort_row_count: int
+    regime_definition: "_RegimeDefinition | None" = None
+
+
+@dataclass(frozen=True)
+class _RegimeDefinition:
+    """Provenance needed to interpret post-hoc water-level regime metrics."""
+
+    quartile_cutoffs_cm: tuple[float, float, float]
+    quartile_reference_count: int
+    alarm_threshold_cm: float
 
 
 def load_latest_complete_comparison_metrics(
@@ -386,7 +406,8 @@ def _validate_execution(
         _sealed_test_metric_names(forecast_horizon_hours),
         run_label="sealed_test",
     )
-    return _CompleteExecution(
+    regime_definition = _extract_regime_definition(sealed_run)
+    execution = _CompleteExecution(
         model=model,
         experiment_name=experiment_name,
         execution_uuid=execution_uuid,
@@ -397,7 +418,15 @@ def _validate_execution(
         test_input_sha256=_required_parameter(sealed_run, "test_input_sha256"),
         forecast_horizon_hours=execution_horizon,
         cohort_row_count=cohort_row_count,
+        regime_definition=regime_definition,
     )
+    if regime_definition is not None:
+        regime_rows = _regime_comparison_rows(execution, forecast_horizon_hours)
+        if not regime_rows:
+            raise ValueError(
+                "sealed-test run has regime provenance but no regime metrics"
+            )
+    return execution
 
 
 def _required_parameter(run: Run, name: str) -> str:
@@ -420,6 +449,111 @@ def _positive_integer_parameter(run: Run, name: str) -> int:
     if parsed <= 0:
         raise ValueError(f"run parameter {name} must be positive")
     return parsed
+
+
+def _parameter_alias(run: Run, names: Sequence[str]) -> str | None:
+    """Return the first non-empty value among equivalent provenance names."""
+    for name in names:
+        value = run.data.params.get(name)
+        if value is not None and value.strip():
+            return value
+    return None
+
+
+def _finite_parameter(run: Run, names: Sequence[str], *, label: str) -> float:
+    """Parse a finite floating-point run parameter with useful diagnostics."""
+    value = _parameter_alias(run, names)
+    if value is None:
+        raise ValueError(f"sealed-test run is missing regime parameter {label}")
+    try:
+        parsed = float(value)
+    except ValueError as error:
+        raise ValueError(
+            f"regime parameter {label} is not numeric: {value!r}"
+        ) from error
+    if not np.isfinite(parsed):
+        raise ValueError(f"regime parameter {label} is not finite")
+    return parsed
+
+
+def _extract_regime_definition(run: Run) -> _RegimeDefinition | None:
+    """Read the optional post-hoc regime provenance from a sealed run.
+
+    Regime diagnostics were added after the first evaluation runs. Legacy runs
+    therefore return ``None`` when none of the regime parameters are present.
+    Once a run advertises any regime parameter, all definition fields are
+    required and validated so a partially logged execution cannot be compared
+    as if its diagnostic contract were complete.
+    """
+    quartile_aliases = (
+        (
+            "regime_q25_cm",
+            "target_water_level_quartile_q25_cm",
+            "water_level_quartile_q25_cm",
+            "quartile_q25_cm",
+        ),
+        (
+            "regime_q50_cm",
+            "target_water_level_quartile_q50_cm",
+            "water_level_quartile_q50_cm",
+            "quartile_q50_cm",
+        ),
+        (
+            "regime_q75_cm",
+            "target_water_level_quartile_q75_cm",
+            "water_level_quartile_q75_cm",
+            "quartile_q75_cm",
+        ),
+    )
+    reference_aliases = (
+        "regime_quartile_reference_count",
+        "target_water_level_quartile_reference_count",
+        "water_level_quartile_reference_count",
+        "quartile_reference_count",
+    )
+    alarm_aliases = (
+        "regime_alarm_threshold_cm",
+        "water_level_alarm_threshold_cm",
+        "target_water_level_alarm_threshold_cm",
+        "alarm_threshold_cm",
+    )
+    any_regime_parameter = any(
+        _parameter_alias(run, aliases) is not None
+        for aliases in (*quartile_aliases, reference_aliases, alarm_aliases)
+    )
+    if not any_regime_parameter:
+        return None
+
+    cutoff_values = tuple(
+        _finite_parameter(run, aliases, label=f"q{quantile}")
+        for quantile, aliases in zip((25, 50, 75), quartile_aliases, strict=True)
+    )
+    cutoffs: tuple[float, float, float] = (
+        cutoff_values[0],
+        cutoff_values[1],
+        cutoff_values[2],
+    )
+    if any(lower > upper for lower, upper in pairwise(cutoffs)):
+        raise ValueError("Regime quartile cutoffs must be ordered")
+    reference_value = _parameter_alias(run, reference_aliases)
+    if reference_value is None:
+        raise ValueError(
+            "sealed-test run is missing regime parameter quartile_reference_count"
+        )
+    try:
+        reference_count = int(reference_value)
+    except ValueError as error:
+        raise ValueError(
+            "regime parameter quartile_reference_count is not an integer"
+        ) from error
+    if reference_count <= 0:
+        raise ValueError("regime parameter quartile_reference_count must be positive")
+    alarm_threshold = _finite_parameter(run, alarm_aliases, label="alarm_threshold_cm")
+    return _RegimeDefinition(
+        quartile_cutoffs_cm=cutoffs,
+        quartile_reference_count=reference_count,
+        alarm_threshold_cm=alarm_threshold,
+    )
 
 
 def _required_finite_metrics(
@@ -482,6 +616,30 @@ def _validate_cross_model_provenance(
         if len(values) > 1:
             raise ValueError(
                 f"Included executions disagree on {parameter}: {sorted(values)}"
+            )
+    regime_definitions = [
+        execution.regime_definition
+        for execution in executions
+        if execution.regime_definition is not None
+    ]
+    if regime_definitions:
+        definition_values = {
+            (
+                definition.quartile_cutoffs_cm,
+                definition.quartile_reference_count,
+                definition.alarm_threshold_cm,
+            )
+            for definition in regime_definitions
+        }
+        if len(definition_values) > 1:
+            raise ValueError(
+                "Included executions disagree on water-level regime definition"
+            )
+        if len(regime_definitions) != len(executions):
+            warnings.warn(
+                "Some included executions have no water-level regime diagnostics; "
+                "their regime rows will be omitted.",
+                stacklevel=3,
             )
     if executions and (
         executions[0].forecast_horizon_hours != expected_forecast_horizon_hours
@@ -745,6 +903,10 @@ def _feature_subset_cv_frame(rows: Sequence[dict[str, object]]) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
+_REGIME_METRICS = ("mae", "rmse", "me")
+_QUARTILE_REGIMES = ("Q1", "Q2", "Q3", "Q4")
+
+
 def _comparison_rows(
     execution: _CompleteExecution, forecast_horizon_hours: int
 ) -> list[dict[str, object]]:
@@ -807,6 +969,233 @@ def _comparison_rows(
                         "cv_std": horizon_std,
                     }
                 )
+    if execution.regime_definition is not None:
+        rows.extend(_regime_comparison_rows(execution, forecast_horizon_hours))
+    return rows
+
+
+def _regime_parameter_or_metric(
+    run: Run,
+    names: Sequence[str],
+    *,
+    required: bool = True,
+    allow_nan: bool = False,
+) -> float | None:
+    """Read one diagnostic number from MLflow metrics, then parameters.
+
+    Counts are logged as metrics by the training notebooks, while a few early
+    exploratory runs stored them as parameters. Supporting both locations
+    keeps the evaluation report read-only and makes the migration forgiving.
+    """
+    for name in names:
+        if name in run.data.metrics:
+            try:
+                value = float(run.data.metrics[name])
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"Regime metric {name!r} is not numeric") from error
+            if np.isnan(value) and allow_nan:
+                return value
+            if not np.isfinite(value):
+                raise ValueError(f"Regime metric {name!r} is not finite")
+            return value
+    for name in names:
+        value = run.data.params.get(name)
+        if value is not None and value.strip():
+            try:
+                parsed = float(value)
+                if np.isnan(parsed) and allow_nan:
+                    return parsed
+                if not np.isfinite(parsed):
+                    raise ValueError(f"Regime value {name!r} is not finite")
+                return parsed
+            except ValueError as error:
+                raise ValueError(f"Regime value {name!r} is not numeric") from error
+    if required:
+        raise ValueError(f"sealed-test run is missing regime metric: {names[0]}")
+    return None
+
+
+def _regime_metric_names(
+    regime: str,
+    metric: str,
+    horizon: int | None,
+) -> tuple[str, ...]:
+    """Return accepted stable names for one logged regime metric."""
+    slug = regime.lower()
+    suffix = "" if horizon is None else f"_horizon_{horizon:02d}"
+    # The first spelling is the canonical contract. The remaining spellings
+    # keep loading compatible with the short names used by early notebooks.
+    return (
+        f"sealed_test_{slug}_{metric}{suffix}",
+        f"sealed_test_{slug}{suffix}_{metric}",
+        f"sealed_test_quartile_{slug}_{metric}{suffix}",
+        f"sealed_test_quartile_{slug}{suffix}_{metric}",
+        f"test_quartile_{slug}_{metric}{suffix}",
+        f"test_quartile_{slug}{suffix}_{metric}",
+        f"regime_{slug}_{metric}{suffix}",
+        f"regime_{slug}{suffix}_{metric}",
+        f"test_{slug}_{metric}{suffix}",
+        f"test_{slug}{suffix}_{metric}",
+        f"sealed_test_regime_{slug}_{metric}{suffix}",
+        f"test_regime_{slug}_{metric}{suffix}",
+    )
+
+
+def _regime_count_names(regime: str, horizon: int | None) -> tuple[str, ...]:
+    """Return accepted stable names for one logged regime value count."""
+    slug = regime.lower()
+    suffix = "" if horizon is None else f"_horizon_{horizon:02d}"
+    return (
+        f"sealed_test_{slug}_scored_value_count{suffix}",
+        f"sealed_test_{slug}{suffix}_scored_value_count",
+        f"sealed_test_{slug}_scored_values{suffix}",
+        f"sealed_test_{slug}{suffix}_scored_values",
+        f"sealed_test_{slug}_scored_forecast_values{suffix}",
+        f"sealed_test_{slug}{suffix}_scored_forecast_values",
+        f"sealed_test_{slug}_count{suffix}",
+        f"sealed_test_{slug}{suffix}_count",
+        f"sealed_test_quartile_{slug}_scored_value_count{suffix}",
+        f"sealed_test_quartile_{slug}{suffix}_scored_value_count",
+        f"sealed_test_quartile_{slug}_scored_values{suffix}",
+        f"sealed_test_quartile_{slug}{suffix}_scored_values",
+        f"test_quartile_{slug}_scored_value_count{suffix}",
+        f"test_quartile_{slug}{suffix}_scored_value_count",
+        f"test_quartile_{slug}_scored_values{suffix}",
+        f"test_quartile_{slug}{suffix}_scored_values",
+        f"regime_{slug}_scored_value_count{suffix}",
+        f"regime_{slug}{suffix}_scored_value_count",
+        f"regime_{slug}_scored_values{suffix}",
+        f"regime_{slug}{suffix}_scored_values",
+        f"test_{slug}_scored_value_count{suffix}",
+        f"test_{slug}{suffix}_scored_value_count",
+        f"test_{slug}_scored_values{suffix}",
+        f"test_{slug}{suffix}_scored_values",
+        f"test_{slug}_scored_forecast_values{suffix}",
+        f"test_{slug}{suffix}_scored_forecast_values",
+        f"test_{slug}_count{suffix}",
+        f"sealed_test_regime_{slug}_scored_value_count{suffix}",
+        f"test_regime_{slug}_scored_value_count{suffix}",
+    )
+
+
+def _regime_metric_is_present(run: Run, regime: str) -> bool:
+    """Return whether a sealed run advertises metrics for one regime."""
+    names = _regime_metric_names(regime, "mae", None) + _regime_count_names(
+        regime, None
+    )
+    return any(name in run.data.metrics or name in run.data.params for name in names)
+
+
+def _regime_comparison_rows(
+    execution: _CompleteExecution,
+    forecast_horizon_hours: int,
+) -> list[dict[str, object]]:
+    """Convert sealed-test regime metrics into canonical comparison rows."""
+    definition = execution.regime_definition
+    if definition is None:  # pragma: no cover - guarded by the caller
+        return []
+    run = execution.sealed_run
+    base = {
+        "model": execution.model,
+        "execution_uuid": execution.execution_uuid,
+        "train_input_sha256": execution.train_input_sha256,
+        "test_input_sha256": execution.test_input_sha256,
+        "forecast_horizon_hours": execution.forecast_horizon_hours,
+        "cohort_row_count": execution.cohort_row_count,
+        "cohort_size_differs": False,
+        "run_id": run.info.run_id,
+        "completed_at_utc": pd.Timestamp(run.info.end_time, unit="ms", tz="UTC"),
+    }
+    rows: list[dict[str, object]] = []
+    quartile_bounds = (
+        (None, definition.quartile_cutoffs_cm[0]),
+        (definition.quartile_cutoffs_cm[0], definition.quartile_cutoffs_cm[1]),
+        (definition.quartile_cutoffs_cm[1], definition.quartile_cutoffs_cm[2]),
+        (definition.quartile_cutoffs_cm[2], None),
+    )
+    for phase, regimes, bounds in (
+        (
+            "sealed_test_quartile",
+            _QUARTILE_REGIMES,
+            quartile_bounds,
+        ),
+        (
+            "sealed_test_alarm",
+            ("Alarm",),
+            ((definition.alarm_threshold_cm, None),),
+        ),
+    ):
+        if not any(_regime_metric_is_present(run, regime) for regime in regimes):
+            continue
+        for regime, (lower_bound, upper_bound) in zip(regimes, bounds, strict=True):
+            aggregate_count = _regime_parameter_or_metric(
+                run, _regime_count_names(regime, None)
+            )
+            if (
+                aggregate_count is None
+                or aggregate_count < 0
+                or not float(aggregate_count).is_integer()
+            ):
+                raise ValueError(
+                    f"Regime {regime} aggregate count must be a non-negative integer"
+                )
+            for metric in _REGIME_METRICS:
+                value = _regime_parameter_or_metric(
+                    run,
+                    _regime_metric_names(regime, metric, None),
+                    required=aggregate_count > 0,
+                    allow_nan=aggregate_count == 0,
+                )
+                rows.append(
+                    {
+                        **base,
+                        "phase": phase,
+                        "metric": metric,
+                        "scope": "aggregate",
+                        "horizon": None,
+                        "value": value,
+                        "cv_std": None,
+                        "regime": regime,
+                        "lower_bound_cm": lower_bound,
+                        "upper_bound_cm": upper_bound,
+                        "scored_values": aggregate_count,
+                    }
+                )
+            for horizon in range(1, forecast_horizon_hours + 1):
+                horizon_count = _regime_parameter_or_metric(
+                    run, _regime_count_names(regime, horizon)
+                )
+                if (
+                    horizon_count is None
+                    or horizon_count < 0
+                    or not float(horizon_count).is_integer()
+                ):
+                    raise ValueError(
+                        f"Regime {regime} horizon {horizon} count must be a "
+                        "non-negative integer"
+                    )
+                for metric in _REGIME_METRICS:
+                    value = _regime_parameter_or_metric(
+                        run,
+                        _regime_metric_names(regime, metric, horizon),
+                        required=horizon_count > 0,
+                        allow_nan=horizon_count == 0,
+                    )
+                    rows.append(
+                        {
+                            **base,
+                            "phase": phase,
+                            "metric": metric,
+                            "scope": "horizon",
+                            "horizon": horizon,
+                            "value": value,
+                            "cv_std": None,
+                            "regime": regime,
+                            "lower_bound_cm": lower_bound,
+                            "upper_bound_cm": upper_bound,
+                            "scored_values": horizon_count,
+                        }
+                    )
     return rows
 
 
@@ -819,4 +1208,8 @@ def _comparison_frame(rows: Sequence[dict[str, object]]) -> pd.DataFrame:
     frame["forecast_horizon_hours"] = frame["forecast_horizon_hours"].astype("Int64")
     frame["cohort_row_count"] = frame["cohort_row_count"].astype("Int64")
     frame["cohort_size_differs"] = frame["cohort_size_differs"].astype("boolean")
+    frame["lower_bound_cm"] = frame["lower_bound_cm"].astype("Float64")
+    frame["upper_bound_cm"] = frame["upper_bound_cm"].astype("Float64")
+    frame["scored_values"] = frame["scored_values"].astype("Int64")
+    frame["value"] = frame["value"].astype("Float64")
     return frame

@@ -305,6 +305,79 @@ def test_load_latest_complete_returns_exact_tidy_schema_and_coverage() -> None:
     assert result.loc[result["model"].eq("Ridge"), "cohort_size_differs"].all()
 
 
+def test_load_regime_metrics_keeps_empty_groups_and_uses_canonical_provenance() -> None:
+    runs = _execution_runs("persistence", "regime-execution")
+    sealed = runs[1]
+    sealed.data.params.update(
+        regime_q25_cm="10.0",
+        regime_q50_cm="20.0",
+        regime_q75_cm="30.0",
+        regime_quartile_reference_count="100",
+        regime_alarm_threshold_cm="545.0",
+    )
+    for regime in ("q1", "q2", "q3", "q4", "alarm"):
+        sealed.data.metrics[f"regime_{regime}_scored_values"] = 0.0
+        for horizon in (1, 2):
+            sealed.data.metrics[
+                f"regime_{regime}_horizon_{horizon:02d}_scored_values"
+            ] = 0.0
+
+    result = _load({"persistence": runs})
+
+    regime_rows = result.loc[result["phase"].eq("sealed_test_quartile")]
+    assert set(regime_rows["regime"]) == {"Q1", "Q2", "Q3", "Q4"}
+    assert regime_rows["scored_values"].eq(0).all()
+    assert regime_rows["value"].isna().all()
+    q1 = regime_rows.loc[regime_rows["regime"].eq("Q1")]
+    assert q1["upper_bound_cm"].eq(10.0).all()
+    assert q1["lower_bound_cm"].isna().all()
+    assert not result.loc[result["phase"].eq("sealed_test"), "value"].isna().any()
+
+
+def test_load_regime_metrics_falls_back_from_incomplete_newer_execution() -> None:
+    older = _execution_runs("persistence", "older-regime", end_time=2_000)
+    newer = _execution_runs("persistence", "newer-regime", end_time=3_000)
+    newer[1].data.params.update(
+        regime_q25_cm="10.0",
+        regime_q50_cm="20.0",
+        regime_q75_cm="30.0",
+        regime_quartile_reference_count="100",
+        regime_alarm_threshold_cm="545.0",
+    )
+
+    with pytest.warns(UserWarning, match="newer-regime.*incomplete"):
+        result = _load({"persistence": older + newer})
+
+    assert set(result["execution_uuid"]) == {"older-regime"}
+
+
+def test_load_regime_metrics_rejects_cross_model_cutoff_mismatch() -> None:
+    persistence = _execution_runs("persistence", "persistence-regime")
+    ridge = _execution_runs("ridge", "ridge-regime")
+    for runs in (persistence, ridge):
+        sealed = runs[1]
+        sealed.data.params.update(
+            regime_q25_cm="10.0",
+            regime_q50_cm="20.0",
+            regime_q75_cm="30.0",
+            regime_quartile_reference_count="100",
+            regime_alarm_threshold_cm="545.0",
+        )
+        for regime in ("q1", "q2", "q3", "q4", "alarm"):
+            sealed.data.metrics[f"regime_{regime}_scored_values"] = 0.0
+            for horizon in (1, 2):
+                sealed.data.metrics[
+                    f"regime_{regime}_horizon_{horizon:02d}_scored_values"
+                ] = 0.0
+    ridge[1].data.params["regime_q50_cm"] = "21.0"
+
+    with pytest.raises(ValueError, match="regime definition"):
+        _load(
+            {"persistence": persistence, "ridge": ridge},
+            experiments={"Persistence": "persistence", "Ridge": "ridge"},
+        )
+
+
 def test_load_feature_subset_metrics_marks_model_specific_winner_per_subset() -> None:
     runs = _execution_runs("ridge", "ridge-execution")
     provenance = {
