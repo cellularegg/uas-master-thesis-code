@@ -115,6 +115,7 @@ def save_table(
         name: File name stem, referenced from LaTeX as ``tables/{name}.tex``.
         caption: Caption text for the printed float.
         index: Whether to include the DataFrame index in the exported table.
+        math_mode: Whether to wrap numeric cell values in LaTeX math delimiters.
         **to_latex_kwargs: Extra arguments forwarded to
             :meth:`pandas.io.formats.style.Styler.to_latex`.
 
@@ -125,11 +126,19 @@ def save_table(
         FileNotFoundError: If the thesis repository root does not exist.
     """
     path = _artifact_path("tables", f"{name}.tex")
+    math_mode = to_latex_kwargs.pop("math_mode", False)
     styler = frame.style.format(escape="latex", thousands=",", precision=2)
     for axis in (0, 1):
         styler = styler.format_index(escape="latex", axis=axis)
     if not index:
         styler = styler.hide(axis="index")
+    if math_mode:
+        numeric_columns = frame.select_dtypes(include="number").columns
+        styler = styler.format(
+            formatter=lambda value: f"${value:,.2f}$",
+            subset=numeric_columns,
+            escape="latex",
+        )
     styler.to_latex(path, hrules=True, **to_latex_kwargs)
     _print_snippet(f"\\input{{tables/{name}.tex}}", name, caption, environment="table")
     return path
