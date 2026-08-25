@@ -117,8 +117,8 @@ def build_xgboost_estimator(
         random_state: Seed for row/column subsampling reproducibility.
 
     Returns:
-        An ``XGBRegressor`` fitting one tree per target column via
-        ``multi_strategy="one_output_per_tree"``.
+        An ``XGBRegressor`` fitting shared trees across the target columns via
+        ``multi_strategy="multi_output_tree"``.
     """
     return XGBRegressor(
         max_depth=max_depth,
@@ -128,7 +128,7 @@ def build_xgboost_estimator(
         colsample_bytree=colsample_bytree,
         reg_lambda=reg_lambda,
         tree_method="hist",
-        multi_strategy="one_output_per_tree",
+        multi_strategy="multi_output_tree",
         n_jobs=n_jobs,
         random_state=random_state,
     )

@@ -335,6 +335,7 @@ def test_build_xgboost_estimator_fits_and_predicts_the_right_shape() -> None:
     estimator.fit(predictors, targets)
 
     assert isinstance(estimator, XGBRegressor)
+    assert estimator.get_params()["multi_strategy"] == "multi_output_tree"
     predictions = estimator.predict(predictors)
 
     assert predictions.shape == (len(predictors), 2)

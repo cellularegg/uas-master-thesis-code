@@ -93,7 +93,11 @@ def save_figure(figure: plt.Figure, name: str, caption: str = "") -> Path:
 
 
 def save_table(
-    frame: pd.DataFrame, name: str, caption: str = "", **to_latex_kwargs: Any
+    frame: pd.DataFrame,
+    name: str,
+    caption: str = "",
+    index: bool = True,
+    **to_latex_kwargs: Any,
 ) -> Path:
     r"""Write a DataFrame as an ``\input``-able booktabs fragment.
 
@@ -110,6 +114,7 @@ def save_table(
         frame: Table to export.
         name: File name stem, referenced from LaTeX as ``tables/{name}.tex``.
         caption: Caption text for the printed float.
+        index: Whether to include the DataFrame index in the exported table.
         **to_latex_kwargs: Extra arguments forwarded to
             :meth:`pandas.io.formats.style.Styler.to_latex`.
 
@@ -123,6 +128,8 @@ def save_table(
     styler = frame.style.format(escape="latex", thousands=",", precision=2)
     for axis in (0, 1):
         styler = styler.format_index(escape="latex", axis=axis)
+    if not index:
+        styler = styler.hide(axis="index")
     styler.to_latex(path, hrules=True, **to_latex_kwargs)
     _print_snippet(f"\\input{{tables/{name}.tex}}", name, caption, environment="table")
     return path

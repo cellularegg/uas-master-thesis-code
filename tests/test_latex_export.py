@@ -53,6 +53,33 @@ def test_save_table_writes_booktabs_fragment_without_float_wrapper(
     assert r"\label{tab:demo}" in printed
 
 
+def test_save_table_can_wrap_numbers_in_latex_math_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(latex_export, "THESIS_DIR", tmp_path)
+
+    frame = pd.DataFrame({"count": [100718.0]})
+
+    path = latex_export.save_table(frame, "math_mode", math_mode=True)
+
+    assert "$100,718.00$" in path.read_text()
+
+
+def test_save_table_can_omit_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(latex_export, "THESIS_DIR", tmp_path)
+
+    frame = pd.DataFrame({"count": [100718.0]}, index=["row label"])
+
+    path = latex_export.save_table(frame, "without_index", index=False)
+
+    content = path.read_text()
+    assert "row label" not in content
+    assert "count" in content
+    assert "100,718.00" in content
+
+
 def test_missing_thesis_repository_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
