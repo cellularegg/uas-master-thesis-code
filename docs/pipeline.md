@@ -65,8 +65,9 @@ writing.
 For each configured station, raw water values at or below the configured
 validity threshold are treated as missing. The series is sorted and reindexed
 onto a strict, unique hourly UTC grid. Interior gaps no longer than the
-configured interpolation limit are filled linearly and marked by `imputed`;
-longer, leading, and trailing gaps stay null and are not presented as observed
+configured limit are forward-filled from the last valid observation and
+marked by `imputed`; longer, leading, and trailing gaps stay null and are not
+presented as observed
 measurements. INCA precipitation and temperature are left-joined to this water
 timeline. Weather is neither interpolated nor backfilled, so missing source
 weather remains visible to later eligibility checks.

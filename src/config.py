@@ -58,8 +58,8 @@ WEATHER_VARIABLES = [
 
 # Number of future hourly water levels generated as forecast targets.
 FORECAST_HORIZON_HOURS = 24
-# Maximum missing water-level gap length eligible for interpolation.
-MAX_INTERPOLATION_GAP_HOURS = 6
+# Maximum missing water-level gap length eligible for forward-fill.
+MAX_INTERPOLATION_GAP_HOURS = 12
 # Minimum raw water level considered valid; values at or below it are missing.
 MIN_VALID_WATER_LEVEL = 0.0
 # Fraction of chronological rows reserved for the sealed test partition.

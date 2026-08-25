@@ -44,24 +44,24 @@ def test_clean_water_level_reindexes_to_a_strict_hourly_grid() -> None:
     )
 
 
-def test_clean_water_level_interpolates_short_gaps_and_flags_them() -> None:
+def test_clean_water_level_forward_fills_short_gaps_and_flags_them() -> None:
     values: list[float | None] = [1.0, np.nan, np.nan, np.nan, 5.0, 6.0]
     raw = _raw_water(values)
 
     result = clean_water_level(raw, max_gap_hours=3)
 
-    assert result["water_level"].tolist() == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    assert result["water_level"].tolist() == [1.0, 1.0, 1.0, 1.0, 5.0, 6.0]
     assert result["imputed"].tolist() == [False, True, True, True, False, False]
 
 
-def test_clean_water_level_masks_zero_and_negative_values_before_interpolation() -> (
+def test_clean_water_level_masks_zero_and_negative_values_before_forward_filling() -> (
     None
 ):
     raw = _raw_water([2.0, 0.0, -1.0, 5.0])
 
     result = clean_water_level(raw, max_gap_hours=2)
 
-    assert result["water_level"].tolist() == [2.0, 3.0, 4.0, 5.0]
+    assert result["water_level"].tolist() == [2.0, 2.0, 2.0, 5.0]
     assert result["imputed"].tolist() == [False, True, True, False]
     assert result.index.equals(
         pd.date_range("2024-01-01", periods=4, freq="h", tz="UTC")
@@ -73,8 +73,22 @@ def test_clean_water_level_exact_threshold_is_invalid() -> None:
 
     result = clean_water_level(raw, max_gap_hours=1, min_valid_water_level=1.0)
 
-    assert result["water_level"].tolist() == [2.0, 3.0, 4.0]
+    assert result["water_level"].tolist() == [2.0, 2.0, 4.0]
     assert result["imputed"].tolist() == [False, True, False]
+
+
+def test_clean_water_level_forward_fill_does_not_leak_future_values() -> None:
+    values: list[float | None] = [1.0, np.nan, np.nan, np.nan, 5.0, 6.0]
+    raw = _raw_water(values)
+
+    result = clean_water_level(raw, max_gap_hours=3)
+
+    filled = result["water_level"].tolist()[1:4]
+    assert filled == [1.0, 1.0, 1.0]
+    assert all(value == 1.0 for value in filled), (
+        "filled values must equal the last observation before the gap, "
+        "not a blend with the value after it"
+    )
 
 
 @pytest.mark.parametrize(
@@ -134,7 +148,7 @@ def test_preprocess_station_preserves_weather_and_hourly_timeline(
     )
 
     assert result["timestamp"].equals(timestamps.to_series(index=result.index))
-    assert result["water_level"].tolist() == [2.0, 3.0, 4.0, 5.0]
+    assert result["water_level"].tolist() == [2.0, 2.0, 2.0, 5.0]
     pd.testing.assert_frame_equal(
         result[["temperature_2m", "precipitation"]], weather.drop(columns="time")
     )

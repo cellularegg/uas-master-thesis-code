@@ -36,15 +36,18 @@ def clean_water_level(
     """Reindex a station's water-level history to a strict hourly UTC grid.
 
     Raw values at or below ``min_valid_water_level`` are treated as missing.
-    Gaps of at most ``max_gap_hours`` consecutive missing hours are linearly
-    interpolated and flagged via the ``imputed`` column; longer, leading, and
-    trailing gaps are left as ``NaN`` and not flagged.
+    Interior gaps (bounded by a valid observation both before and after) of
+    at most ``max_gap_hours`` consecutive missing hours are forward-filled
+    from the last valid observation and flagged via the ``imputed`` column;
+    longer, leading, and trailing gaps are left as ``NaN`` and not flagged.
+    Forward-filling only ever reads values at or before the timestamp being
+    filled, so the fill is causal with respect to issue time.
 
     Args:
         raw: Raw PegelAlarm history with ``sourceDate``, ``value``, and
             ``station_id`` columns.
         max_gap_hours: Maximum length, in hours, of a gap that gets
-            interpolated.
+            forward-filled.
         min_valid_water_level: Raw values at or below this threshold are
             treated as missing before gap detection.
 
@@ -68,10 +71,10 @@ def clean_water_level(
     missing = series.isna()
     gap_id = (missing != missing.shift()).cumsum()
     gap_length = missing.groupby(gap_id).transform("size").where(missing, 0)
-    interpolated = series.interpolate(
-        method="time", limit_area="inside", limit_direction="forward"
-    )
-    filled = series.where(gap_length > max_gap_hours, interpolated)
+    forward_filled = series.ffill()
+    is_interior_gap = missing & series.ffill().notna() & series.bfill().notna()
+    fillable = is_interior_gap & (gap_length <= max_gap_hours)
+    filled = series.where(~fillable, forward_filled)
     imputed = missing & filled.notna()
 
     return pd.DataFrame(
@@ -117,10 +120,10 @@ def preprocess_station(
         raw_dir: Directory containing the raw parquet files from
             `01_fetch_data.ipynb`.
         max_gap_hours: Maximum length, in hours, of a water-level gap that
-            gets interpolated.
+            gets forward-filled.
         weather_variables: Weather columns to keep.
         min_valid_water_level: Raw water-level values at or below this
-            threshold are treated as missing before interpolation.
+            threshold are treated as missing before gap filling.
 
     Returns:
         Merged, hourly, analysis-ready DataFrame for the station.
@@ -465,7 +468,7 @@ def write_joined_preprocess_artifacts(
         output_dir: Destination directory for the three artifacts.
         test_fraction: Fraction used to create the supplied partitions.
         min_valid_water_level: Raw water-level values at or below this
-            threshold were treated as missing before interpolation.
+            threshold were treated as missing before gap filling.
         coverage_report: Optional per-station target-range overlap records from
             :func:`filter_station_frames_by_target_range_overlap`.
 
@@ -546,7 +549,7 @@ def write_preprocess_artifacts(
         output_dir: Destination directory for the three artifacts.
         test_fraction: Fraction used to create the supplied partitions.
         min_valid_water_level: Raw water-level values at or below this
-            threshold were treated as missing before interpolation.
+            threshold were treated as missing before gap filling.
 
     Returns:
         The metadata dictionary written to JSON.

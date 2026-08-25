@@ -69,10 +69,13 @@ it leaves no manifest.
 
 The durable record of one execution, written once, after the sealed test has
 been scored. Ridge, MLP, XGBoost, Random Forest, and Extra Trees write a
-model-specific JSON manifest (schema `1.0` for the latter four) carrying the
-feature contract, selected candidate, full CV table, and aggregate/per-horizon
-sealed-test metrics. It is what a notebook's evaluation half reads back —
-MLflow is the run log and UI, not the record.
+model-specific JSON manifest carrying the saved model's identity and exact
+input/output contract: estimator and preprocessor identity, the selected
+candidate and hyperparameters, ordered feature and target columns, model path,
+and `execution_uuid`. It contains no CV table, sealed-test metrics, or other
+regime, cohort, and training diagnostics. Those diagnostics remain in MLflow,
+which is the durable scientific record of the training and evaluation results;
+the manifest is the durable record of the serialized model contract.
 
 `src/ridge.py`, `src/mlp.py`, `src/xgboost_model.py`, `src/random_forest.py`,
 and `src/extra_trees.py` expose model-specific save/load helpers and manifest
