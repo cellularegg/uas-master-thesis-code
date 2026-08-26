@@ -15,6 +15,7 @@ from src.preprocess import (
     join_station_frames,
     merge_weather,
     preprocess_station,
+    split_station_frames_at_target_boundary,
     split_train_test,
     write_joined_preprocess_artifacts,
     write_preprocess_artifacts,
@@ -343,16 +344,13 @@ def test_joined_artifacts_can_persist_coverage_metadata(
         {"target-at": target, "upstream-at": upstream},
         target_station_id="target-at",
     )
-    target_train, target_test = split_train_test(retained["target-at"], 0.20)
-    upstream_train, upstream_test = split_train_test(retained["upstream-at"], 0.20)
-    joined_train = join_station_frames(
-        {"target-at": target_train, "upstream-at": upstream_train},
-        target_station_id="target-at",
+    train_by_station, test_by_station, split_boundary = (
+        split_station_frames_at_target_boundary(
+            retained, target_station_id="target-at", test_fraction=0.20
+        )
     )
-    joined_test = join_station_frames(
-        {"target-at": target_test, "upstream-at": upstream_test},
-        target_station_id="target-at",
-    )
+    joined_train = join_station_frames(train_by_station, target_station_id="target-at")
+    joined_test = join_station_frames(test_by_station, target_station_id="target-at")
 
     metadata = write_joined_preprocess_artifacts(
         joined_train,
@@ -360,11 +358,12 @@ def test_joined_artifacts_can_persist_coverage_metadata(
         station_ids=list(retained),
         target_station_id="target-at",
         output_dir=tmp_path,
+        split_boundary_utc=split_boundary,
         test_fraction=0.20,
         coverage_report=coverage_report,
     )
 
-    assert metadata["schema_version"] == "1.1"
+    assert metadata["schema_version"] == "2.0"
     assert metadata["configuration"]["min_valid_water_level"] == 0.0
     assert metadata["coverage"] == coverage_report
     assert (
@@ -445,12 +444,14 @@ def test_write_artifacts_records_hashes_schemas_rows_and_boundaries(
     station_id = "station-at"
     output_dir = tmp_path / "processed"
     train, test = split_train_test(_station_frame(503), 0.20)
+    split_boundary = train["timestamp"].iloc[-1]
 
     metadata = write_preprocess_artifacts(
         train,
         test,
         station_id=station_id,
         output_dir=output_dir,
+        split_boundary_utc=split_boundary,
         test_fraction=0.20,
     )
 
@@ -488,6 +489,7 @@ def test_writer_rejects_partitions_that_do_not_match_the_contract(
     tmp_path: Path,
 ) -> None:
     train, test = split_train_test(_station_frame(100), 0.20)
+    split_boundary = train["timestamp"].iloc[-1]
 
     with pytest.raises(ValueError, match="train does not match"):
         write_preprocess_artifacts(
@@ -495,37 +497,38 @@ def test_writer_rejects_partitions_that_do_not_match_the_contract(
             pd.concat([train.iloc[[-1]], test], ignore_index=True),
             station_id="station-at",
             output_dir=tmp_path,
+            split_boundary_utc=split_boundary,
             test_fraction=0.20,
         )
 
 
 def _joined_partitions(
     *, rows: int = 500, test_fraction: float = 0.20, upstream_start: str | None = None
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    target_train, target_test = split_train_test(
-        _station_frame(rows, station_id="target-at"), test_fraction
-    )
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Timestamp]:
     upstream = _station_frame(rows, station_id="upstream-at")
     if upstream_start is not None:
         upstream["timestamp"] = pd.date_range(
             upstream_start, periods=rows, freq="h", tz="UTC"
         )
-    upstream_train, upstream_test = split_train_test(upstream, test_fraction)
-    joined_train = join_station_frames(
-        {"target-at": target_train, "upstream-at": upstream_train},
-        target_station_id="target-at",
+    train_by_station, test_by_station, boundary = (
+        split_station_frames_at_target_boundary(
+            {
+                "target-at": _station_frame(rows, station_id="target-at"),
+                "upstream-at": upstream,
+            },
+            target_station_id="target-at",
+            test_fraction=test_fraction,
+        )
     )
-    joined_test = join_station_frames(
-        {"target-at": target_test, "upstream-at": upstream_test},
-        target_station_id="target-at",
-    )
-    return joined_train, joined_test
+    joined_train = join_station_frames(train_by_station, target_station_id="target-at")
+    joined_test = join_station_frames(test_by_station, target_station_id="target-at")
+    return joined_train, joined_test, boundary
 
 
 def test_write_joined_artifacts_records_hashes_schemas_and_rows(
     tmp_path: Path,
 ) -> None:
-    joined_train, joined_test = _joined_partitions()
+    joined_train, joined_test, split_boundary = _joined_partitions()
     output_dir = tmp_path / "joined"
 
     metadata = write_joined_preprocess_artifacts(
@@ -534,6 +537,7 @@ def test_write_joined_artifacts_records_hashes_schemas_and_rows(
         station_ids=["target-at", "upstream-at"],
         target_station_id="target-at",
         output_dir=output_dir,
+        split_boundary_utc=split_boundary,
         test_fraction=0.20,
     )
 
@@ -554,7 +558,7 @@ def test_write_joined_artifacts_records_hashes_schemas_and_rows(
 def test_write_joined_artifacts_rejects_target_missing_from_station_ids(
     tmp_path: Path,
 ) -> None:
-    joined_train, joined_test = _joined_partitions()
+    joined_train, joined_test, split_boundary = _joined_partitions()
 
     with pytest.raises(ValueError, match="target station"):
         write_joined_preprocess_artifacts(
@@ -563,13 +567,14 @@ def test_write_joined_artifacts_rejects_target_missing_from_station_ids(
             station_ids=["upstream-at"],
             target_station_id="target-at",
             output_dir=tmp_path,
+            split_boundary_utc=split_boundary,
         )
 
 
 def test_write_joined_artifacts_rejects_station_missing_from_joined_frame(
     tmp_path: Path,
 ) -> None:
-    joined_train, joined_test = _joined_partitions()
+    joined_train, joined_test, split_boundary = _joined_partitions()
 
     with pytest.raises(ValueError, match="missing station_id columns"):
         write_joined_preprocess_artifacts(
@@ -578,4 +583,106 @@ def test_write_joined_artifacts_rejects_station_missing_from_joined_frame(
             station_ids=["target-at", "upstream-at", "other-at"],
             target_station_id="target-at",
             output_dir=tmp_path,
+            split_boundary_utc=split_boundary,
+        )
+
+
+def _late_starting_station(*, rows: int, start: str, station_id: str) -> pd.DataFrame:
+    frame = _station_frame(rows, station_id=station_id)
+    frame["timestamp"] = pd.date_range(start, periods=rows, freq="h", tz="UTC")
+    return frame
+
+
+def test_shared_boundary_splits_every_station_at_the_target_timestamp() -> None:
+    target = _station_frame(500, station_id="target-at")
+    upstream = _late_starting_station(
+        rows=404, start="2024-01-05", station_id="upstream-at"
+    )
+
+    train_by_station, test_by_station, boundary = (
+        split_station_frames_at_target_boundary(
+            {"target-at": target, "upstream-at": upstream},
+            target_station_id="target-at",
+            test_fraction=0.20,
+        )
+    )
+
+    assert boundary == target["timestamp"].iloc[399]
+    for station_id in ("target-at", "upstream-at"):
+        assert train_by_station[station_id]["timestamp"].max() == boundary
+        assert test_by_station[station_id]["timestamp"].min() > boundary
+    # The upstream station's own floor(0.8*N) would fall at a different hour.
+    own_train, _own_test = split_train_test(upstream, 0.20)
+    assert own_train["timestamp"].iloc[-1] != boundary
+
+
+def test_shared_boundary_keeps_misaligned_stations_joinable() -> None:
+    """The joined sealed test must not lose hours to split misalignment."""
+    target = _station_frame(500, station_id="target-at")
+    upstream = _late_starting_station(
+        rows=404, start="2024-01-05", station_id="upstream-at"
+    )
+    frames = {"target-at": target, "upstream-at": upstream}
+
+    _train_by_station, test_by_station, _boundary = (
+        split_station_frames_at_target_boundary(
+            frames, target_station_id="target-at", test_fraction=0.20
+        )
+    )
+    joined_test = join_station_frames(test_by_station, target_station_id="target-at")
+
+    assert joined_test["upstream-at__water_level"].notna().all()
+
+    # Splitting each station at its own fraction strands upstream hours.
+    independent_test = join_station_frames(
+        {
+            station_id: split_train_test(frame, 0.20)[1]
+            for station_id, frame in frames.items()
+        },
+        target_station_id="target-at",
+    )
+    assert independent_test["upstream-at__water_level"].isna().any()
+
+
+def test_shared_boundary_rejects_a_station_that_never_reaches_the_test_side() -> None:
+    target = _station_frame(500, station_id="target-at")
+    retired = _late_starting_station(
+        rows=100, start="2024-01-01", station_id="retired-at"
+    )
+
+    with pytest.raises(ValueError, match="does not span the shared split boundary"):
+        split_station_frames_at_target_boundary(
+            {"target-at": target, "retired-at": retired},
+            target_station_id="target-at",
+            test_fraction=0.20,
+        )
+
+
+def test_shared_boundary_rejects_missing_target_and_mismatched_station() -> None:
+    target = _station_frame(500, station_id="target-at")
+
+    with pytest.raises(ValueError, match="target station"):
+        split_station_frames_at_target_boundary(
+            {"target-at": target}, target_station_id="absent-at"
+        )
+    with pytest.raises(ValueError, match="does not match mapping key"):
+        split_station_frames_at_target_boundary(
+            {"target-at": target, "upstream-at": target},
+            target_station_id="target-at",
+        )
+
+
+def test_joined_writer_rejects_partitions_that_straddle_the_boundary(
+    tmp_path: Path,
+) -> None:
+    joined_train, joined_test, split_boundary = _joined_partitions()
+
+    with pytest.raises(ValueError, match="joined train rows must end at"):
+        write_joined_preprocess_artifacts(
+            pd.concat([joined_train, joined_test.iloc[[0]]], ignore_index=True),
+            joined_test.iloc[1:].reset_index(drop=True),
+            station_ids=["target-at", "upstream-at"],
+            target_station_id="target-at",
+            output_dir=tmp_path,
+            split_boundary_utc=split_boundary,
         )

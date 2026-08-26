@@ -310,6 +310,79 @@ def split_train_test(
     return train, test
 
 
+def _utc_boundary(value: object) -> pd.Timestamp:
+    """Validate and normalize a shared split boundary to a UTC timestamp."""
+    boundary = pd.Timestamp(value)  # type: ignore[arg-type]
+    if boundary.tz is None:
+        raise ValueError("split_boundary_utc must be timezone-aware")
+    return boundary.tz_convert("UTC")
+
+
+def split_station_frames_at_target_boundary(
+    station_frames: Mapping[str, pd.DataFrame],
+    *,
+    target_station_id: str,
+    test_fraction: float = TEST_FRACTION,
+) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame], pd.Timestamp]:
+    """Split every station timeline at one boundary derived from the target.
+
+    The target station's own chronological :func:`split_train_test` fixes the
+    last training hour, and every station is then cut at that same timestamp.
+    Splitting each station at its own row-count fraction instead would place
+    the boundaries at different hours, because station timelines differ in
+    length; rows that one station files as training data and another as test
+    data are then dropped by the joined artifact's completeness gate.
+
+    Args:
+        station_frames: Complete, pre-split station frames keyed by station ID.
+        target_station_id: Station whose split fixes the shared boundary.
+        test_fraction: Fraction of the target's rows reserved for the tail.
+
+    Returns:
+        The train frames, the sealed-test frames, and the shared boundary: the
+        last timestamp belonging to the training partition.
+
+    Raises:
+        TypeError: If ``test_fraction`` is not numeric.
+        ValueError: If the mapping is empty, the target is missing, a frame's
+            station ID does not match its key, a timeline is invalid, or a
+            station lies entirely on one side of the boundary.
+    """
+    if not station_frames:
+        raise ValueError("station_frames must contain at least one station")
+    if target_station_id not in station_frames:
+        raise ValueError(
+            f"target station {target_station_id!r} is missing from station_frames"
+        )
+
+    target_train, _target_test = split_train_test(
+        station_frames[target_station_id], test_fraction
+    )
+    boundary = _utc_boundary(target_train["timestamp"].iloc[-1])
+
+    train_by_station: dict[str, pd.DataFrame] = {}
+    test_by_station: dict[str, pd.DataFrame] = {}
+    for station_id, frame in station_frames.items():
+        ordered = _validate_hourly_station_frame(frame)
+        frame_station_ids = ordered["station_id"].drop_duplicates().tolist()
+        if frame_station_ids != [station_id]:
+            raise ValueError(
+                f"frame station identifier does not match mapping key {station_id!r}: "
+                f"{frame_station_ids!r}"
+            )
+        is_train = ordered["timestamp"].le(boundary)
+        train = ordered.loc[is_train].reset_index(drop=True)
+        test = ordered.loc[~is_train].reset_index(drop=True)
+        if train.empty or test.empty:
+            raise ValueError(
+                f"station {station_id!r} does not span the shared split boundary "
+                f"{boundary.isoformat()}; it cannot contribute both partitions"
+            )
+        train_by_station[station_id] = train
+        test_by_station[station_id] = test
+    return train_by_station, test_by_station, boundary
+
+
 def join_station_frames(
     station_frames: Mapping[str, pd.DataFrame], *, target_station_id: str
 ) -> pd.DataFrame:
@@ -454,6 +527,7 @@ def write_joined_preprocess_artifacts(
     station_ids: Sequence[str],
     target_station_id: str,
     output_dir: Path,
+    split_boundary_utc: pd.Timestamp,
     test_fraction: float = TEST_FRACTION,
     min_valid_water_level: float = MIN_VALID_WATER_LEVEL,
     coverage_report: Sequence[Mapping[str, Any]] | None = None,
@@ -466,7 +540,11 @@ def write_joined_preprocess_artifacts(
         station_ids: Every station represented in the joined frames.
         target_station_id: Station whose timeline defines the joined timestamps.
         output_dir: Destination directory for the three artifacts.
-        test_fraction: Fraction used to create the supplied partitions.
+        split_boundary_utc: Shared last training timestamp every station was
+            split at, from
+            :func:`split_station_frames_at_target_boundary`.
+        test_fraction: Fraction that produced the shared boundary, recorded for
+            provenance only.
         min_valid_water_level: Raw water-level values at or below this
             threshold were treated as missing before gap filling.
         coverage_report: Optional per-station target-range overlap records from
@@ -487,8 +565,13 @@ def write_joined_preprocess_artifacts(
             f"target station {target_station_id!r} is missing from station_ids"
         )
     threshold = _validate_min_valid_water_level(min_valid_water_level)
+    boundary = _utc_boundary(split_boundary_utc)
     combined = pd.concat([joined_train, joined_test], ignore_index=True)
     _validate_joined_frame(combined, station_ids=station_ids)
+    if not joined_train["timestamp"].le(boundary).all():
+        raise ValueError("joined train rows must end at split_boundary_utc")
+    if not joined_test["timestamp"].gt(boundary).all():
+        raise ValueError("joined test rows must start after split_boundary_utc")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     train_path = output_dir / "all_stations_train.parquet"
@@ -499,7 +582,7 @@ def write_joined_preprocess_artifacts(
 
     generator_path = Path(__file__)
     metadata: dict[str, Any] = {
-        "schema_version": "1.1",
+        "schema_version": "2.0",
         "generated_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "station_ids": list(station_ids),
         "target_station_id": target_station_id,
@@ -507,7 +590,8 @@ def write_joined_preprocess_artifacts(
             "test_fraction": test_fraction,
             "min_valid_water_level": threshold,
             "min_target_range_overlap": MIN_TARGET_RANGE_OVERLAP,
-            "split_rule": "first floor((1-test_fraction)*N) rows are train; the remainder is sealed test data",
+            "split_boundary_utc": _utc_text(boundary),
+            "split_rule": "rows through split_boundary_utc are train; later rows are sealed test data. The boundary is the target station's first floor((1-test_fraction)*N) rows and is shared by every station",
         },
         "rows": {
             "total": len(combined),
@@ -537,6 +621,7 @@ def write_preprocess_artifacts(
     *,
     station_id: str,
     output_dir: Path,
+    split_boundary_utc: pd.Timestamp,
     test_fraction: float = TEST_FRACTION,
     min_valid_water_level: float = MIN_VALID_WATER_LEVEL,
 ) -> dict[str, Any]:
@@ -547,7 +632,11 @@ def write_preprocess_artifacts(
         test: Sealed trailing partition returned by :func:`split_train_test`.
         station_id: Identifier used in artifact names and metadata.
         output_dir: Destination directory for the three artifacts.
-        test_fraction: Fraction used to create the supplied partitions.
+        split_boundary_utc: Shared last training timestamp every station is
+            split at, from
+            :func:`split_station_frames_at_target_boundary`.
+        test_fraction: Fraction that produced the shared boundary, recorded for
+            provenance only.
         min_valid_water_level: Raw water-level values at or below this
             threshold were treated as missing before gap filling.
 
@@ -556,12 +645,21 @@ def write_preprocess_artifacts(
 
     Raises:
         TypeError: If ``min_valid_water_level`` is not a real number.
-        ValueError: If ``min_valid_water_level`` is not finite or the partitions
-            do not reconstruct a valid split for the station and fraction.
+        ValueError: If ``min_valid_water_level`` is not finite, the boundary is
+            not timezone-aware, or the partitions do not reconstruct the split
+            the boundary defines.
     """
     threshold = _validate_min_valid_water_level(min_valid_water_level)
+    boundary = _utc_boundary(split_boundary_utc)
     combined = pd.concat([train, test], ignore_index=True)
-    expected_train, expected_test = split_train_test(combined, test_fraction)
+    ordered = _validate_hourly_station_frame(combined)
+    is_train = ordered["timestamp"].le(boundary)
+    expected_train = ordered.loc[is_train].reset_index(drop=True)
+    expected_test = ordered.loc[~is_train].reset_index(drop=True)
+    if expected_train.empty or expected_test.empty:
+        raise ValueError(
+            "split_boundary_utc must produce non-empty train and test partitions"
+        )
     if not train.reset_index(drop=True).equals(expected_train):
         raise ValueError("train does not match the chronological split contract")
     if not test.reset_index(drop=True).equals(expected_test):
@@ -578,13 +676,14 @@ def write_preprocess_artifacts(
 
     generator_path = Path(__file__)
     metadata: dict[str, Any] = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "generated_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "station_id": station_id,
         "configuration": {
             "test_fraction": test_fraction,
             "min_valid_water_level": threshold,
-            "split_rule": "first floor((1-test_fraction)*N) rows are train; the remainder is sealed test data",
+            "split_boundary_utc": _utc_text(boundary),
+            "split_rule": "rows through split_boundary_utc are train; later rows are sealed test data. The boundary is the target station's first floor((1-test_fraction)*N) rows and is shared by every station",
         },
         "rows": {
             "total": len(combined),

@@ -1,10 +1,50 @@
+from typing import cast
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from src.model_selection import select_candidate, tie_breaking_policy
+from src.model_selection import (
+    deduplicate_sampled_parameters,
+    select_candidate,
+    tie_breaking_policy,
+)
 
 TIE_BREAK_COLUMNS = ["feature_count", "alpha", "subset"]
+
+
+def test_deduplicate_sampled_parameters_keeps_first_mapping_in_order() -> None:
+    sampled_parameters: list[dict[str, object]] = [
+        {"depth": 3, "alpha": 0.1},
+        {"depth": 5, "alpha": 0.2},
+        {"depth": 3, "alpha": 0.1},
+        {"depth": 5, "alpha": 0.2},
+    ]
+
+    unique_parameters = deduplicate_sampled_parameters(
+        sampled_parameters,
+        key=lambda parameters: (
+            int(cast(int, parameters["depth"])),
+            float(cast(float, parameters["alpha"])),
+        ),
+    )
+
+    assert unique_parameters == sampled_parameters[:2]
+
+
+def test_deduplicate_sampled_parameters_uses_canonical_key() -> None:
+    sampled_parameters: list[dict[str, object]] = [
+        {"alpha": 1},
+        {"alpha": 1.0},
+        {"alpha": 2},
+    ]
+
+    unique_parameters = deduplicate_sampled_parameters(
+        sampled_parameters,
+        key=lambda parameters: float(cast(float, parameters["alpha"])),
+    )
+
+    assert unique_parameters == [{"alpha": 1}, {"alpha": 2}]
 
 
 def test_select_candidate_ranks_by_metric_then_tie_break_columns_in_order() -> None:

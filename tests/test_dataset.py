@@ -269,7 +269,7 @@ def test_load_joined_dataset_preserves_the_project_feature_contract(
 
     subsets = _load(paths, station_id=TARGET_STATION_ID).feature_subsets
 
-    assert [len(columns) for columns in subsets.values()] == [81, 55, 32, 53, 41, 8]
+    assert [len(columns) for columns in subsets.values()] == [73, 49, 32, 45, 35, 8]
     assert len({tuple(columns) for columns in subsets.values()}) == 6
     for columns in subsets.values():
         assert len(columns) == len(set(columns))

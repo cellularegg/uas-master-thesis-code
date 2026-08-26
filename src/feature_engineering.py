@@ -40,8 +40,8 @@ class FeatureConfig:
 
     horizon_hours: int = FORECAST_HORIZON_HOURS
     calendar_timezone: str = "UTC"
-    lag_hours: tuple[int, ...] = (1, 3, 6, 12, 24, 48, 72, 168)
-    rolling_windows: tuple[int, ...] = (6, 24, 72, 168)
+    lag_hours: tuple[int, ...] = (1, 3, 6, 12, 24, 48, 72)
+    rolling_windows: tuple[int, ...] = (6, 24, 72)
 
     def __post_init__(self) -> None:
         """Reject values that cannot define the stage-03 feature contract."""

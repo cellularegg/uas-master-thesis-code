@@ -72,26 +72,35 @@ measurements. INCA precipitation and temperature are left-joined to this water
 timeline. Weather is neither interpolated nor backfilled, so missing source
 weather remains visible to later eligibility checks.
 
-Each station frame is split chronologically. The leading
-`floor((1 - TEST_FRACTION) * N)` rows form training data and the remainder form
-the physically sealed test artifact. The partitions are written separately;
-they are never recombined for feature lookbacks or model preprocessing.
-
-Before the wide join, each station's complete hourly span is compared with the
+Before the split, each station's complete hourly span is compared with the
 target station's span. Stations meeting `MIN_TARGET_RANGE_OVERLAP` are retained,
-and the target is retained unconditionally. The notebook orders retained
-upstream gauges by river-kilometre distance from the target. Train and test are
+and the target is retained unconditionally.
+
+Every retained station is then split chronologically at one shared boundary.
+The boundary is the last timestamp of the target station's own leading
+`floor((1 - TEST_FRACTION) * N)` rows; rows through that timestamp form
+training data and later rows form the physically sealed test artifact. The
+boundary is shared deliberately: station timelines differ in length, so
+splitting each station at its own row-count fraction lands the boundaries on
+different hours, and rows one station files as training data while another
+files them as test data are stranded as nulls that the joined completeness gate
+later drops. The partitions are written separately; they are never recombined
+for feature lookbacks or model preprocessing.
+
+The notebook orders retained upstream gauges by river-kilometre distance from
+the target. Train and test are
 joined independently, using the target station's timestamps as the left-hand
 timeline. Every non-timestamp column is prefixed `<station_id>__`; an upstream
 value remains null when that station has no row at a target timestamp.
 
 Per-station train/test Parquets and JSON manifests are written under
-`data/processed/separate/`. The joined outputs are
+`data/processed/separate/` for the retained stations. The joined outputs are
 `data/processed/joined/all_stations_train.parquet`,
 `all_stations_test.parquet`, and `all_stations_preprocess_metadata.json`. The
 manifests capture configuration, UTC ranges, row counts, artifact schemas,
 paths and hashes, plus generator provenance. The joined manifest additionally
-records the retained station order and the per-station overlap/retention report.
+records the retained station order, the shared `split_boundary_utc`, and the
+per-station overlap/retention report.
 
 ## Stage 3: feature engineering
 

@@ -1,8 +1,33 @@
 """Estimator-agnostic candidate ranking shared by every CV-searched model."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 
 import pandas as pd
+
+
+def deduplicate_sampled_parameters(
+    sampled_parameters: Sequence[Mapping[str, object]],
+    *,
+    key: Callable[[Mapping[str, object]], Hashable],
+) -> list[dict[str, object]]:
+    """Keep the first sampled parameter mapping for each canonical key.
+
+    ``ParameterSampler`` samples with replacement whenever a distribution is
+    present. This helper turns those draws into a stable unique candidate list
+    without changing the order in which the sampler produced them.
+
+    Args:
+        sampled_parameters: Parameter mappings returned by a sampler.
+        key: Function returning the hashable canonical identity of one mapping.
+
+    Returns:
+        Copies of the first mapping observed for each unique canonical key.
+    """
+    unique_parameters: dict[Hashable, dict[str, object]] = {}
+    for parameters in sampled_parameters:
+        canonical_key = key(parameters)
+        unique_parameters.setdefault(canonical_key, dict(parameters))
+    return list(unique_parameters.values())
 
 
 def select_candidate(

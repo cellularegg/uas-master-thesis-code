@@ -68,7 +68,7 @@ def test_column_helpers_define_the_complete_stable_contract() -> None:
         "utc_day_of_year_sin",
         "utc_day_of_year_cos",
     )
-    assert len(predictors) == len(set(predictors)) == 53
+    assert len(predictors) == len(set(predictors)) == 45
     assert targets == tuple(f"target_t_plus_{hour:02d}" for hour in range(1, 25))
 
 
@@ -80,7 +80,7 @@ def test_builds_exact_lag_change_rolling_weather_and_calendar_values() -> None:
     row = result.iloc[180]
 
     assert row["water_level_lag_1h"] == 179.0
-    assert row["water_level_lag_168h"] == 12.0
+    assert row["water_level_lag_72h"] == 108.0
     assert row["water_level_change_24h"] == 24.0
     assert row["water_level_rolling_mean_6h"] == pytest.approx(177.5)
     assert row["water_level_rolling_std_6h"] == pytest.approx(
@@ -144,7 +144,7 @@ def test_incomplete_or_missing_lookbacks_remain_nan_without_dropping_rows() -> N
 
     assert len(result) == len(frame)
     assert result.index.equals(frame.index)
-    assert result.loc[:166, "water_level_lag_168h"].isna().all()
+    assert result.loc[:71, "water_level_lag_72h"].isna().all()
     assert np.isnan(float(result["water_level_rolling_mean_6h"].iloc[12]))
     assert np.isnan(float(result["precipitation_rolling_sum_6h"].iloc[25]))
     assert not np.isnan(float(result["precipitation_rolling_sum_6h"].iloc[26]))
@@ -530,7 +530,7 @@ def test_is_log1p_eligible_base_name_matches_expected_water_level_columns() -> N
     assert "water_level_lag_1h" in expected_eligible
     assert "water_level_rolling_mean_6h" in expected_eligible
     assert "water_level_rolling_min_24h" in expected_eligible
-    assert "water_level_rolling_max_168h" in expected_eligible
+    assert "water_level_rolling_max_72h" in expected_eligible
 
 
 def test_log1p_eligible_columns_strips_station_prefix_and_preserves_order() -> None:
