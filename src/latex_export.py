@@ -94,16 +94,66 @@ def save_figure(figure: plt.Figure, name: str, caption: str = "") -> Path:
     return path
 
 
+def _default_tabularx_column_format(frame: pd.DataFrame, index: bool) -> str:
+    """Build a compact ``tabularx`` column specification for a frame.
+
+    Args:
+        frame: Table whose columns are being exported.
+        index: Whether the DataFrame index is included in the table.
+
+    Returns:
+        A LaTeX column specification with at least one stretchable ``X`` column.
+    """
+    formats = ["l"] * (frame.index.nlevels if index else 0)
+    formats.extend(
+        "r" if pd.api.types.is_numeric_dtype(frame[column]) else "X"
+        for column in frame.columns
+    )
+    if not formats:
+        raise ValueError("Cannot export a table with no columns")
+    if "X" not in formats:
+        formats[0] = "X"
+    return f"@{{}}{''.join(formats)}@{{}}"
+
+
+def _add_latex_row_spacing(latex: str) -> str:
+    r"""Insert ``\addlinespace`` between the table body rows.
+
+    Args:
+        latex: Rendered LaTeX table.
+
+    Returns:
+        The rendered table with ``\addlinespace`` between body rows.
+    """
+    lines = latex.splitlines()
+    try:
+        body_start = lines.index(r"\midrule") + 1
+        body_end = lines.index(r"\bottomrule")
+    except ValueError:
+        return latex
+
+    body_rows = lines[body_start:body_end]
+    lines[body_start:body_end] = [
+        part
+        for row_number, row in enumerate(body_rows)
+        for part in (([r"\addlinespace"] if row_number else []) + [row])
+    ]
+    return "\n".join(lines) + ("\n" if latex.endswith("\n") else "")
+
+
 def save_table(
     frame: pd.DataFrame,
     name: str,
     caption: str = "",
     index: bool = True,
+    addlinespace: bool = False,
     **to_latex_kwargs: Any,
 ) -> Path:
-    r"""Write a DataFrame as an ``\input``-able booktabs fragment.
+    r"""Write a DataFrame as an ``\input``-able ``tabularx`` booktabs fragment.
 
-    ``hrules=True`` emits ``booktabs`` rules, which the thesis preamble must load.
+    ``hrules=True`` emits ``booktabs`` rules, and the default ``tabularx``
+    environment fills the thesis text width. The thesis preamble must load both
+    packages. Pass ``environment=None`` to retain pandas' plain ``tabular`` output.
     Values and both axes' labels are LaTeX-escaped, so column names such as
     ``207241-at__water_level`` and a ``25%`` index label still compile. Numbers
     are grouped with ``,`` every three digits, matching the exported figures, and
@@ -117,7 +167,11 @@ def save_table(
         name: File name stem, referenced from LaTeX as ``tables/{name}.tex``.
         caption: Caption text for the printed float.
         index: Whether to include the DataFrame index in the exported table.
+        addlinespace: Whether to add ``\addlinespace`` between body rows.
         math_mode: Whether to wrap numeric cell values in LaTeX math delimiters.
+        environment: LaTeX table environment, defaulting to ``"tabularx"``.
+        column_format: LaTeX column specification. For ``tabularx``, a suitable
+            specification is generated when it is omitted.
         **to_latex_kwargs: Extra arguments forwarded to
             :meth:`pandas.io.formats.style.Styler.to_latex`.
 
@@ -141,6 +195,18 @@ def save_table(
             subset=numeric_columns,
             escape="latex",
         )
-    styler.to_latex(path, hrules=True, **to_latex_kwargs)
+    environment = to_latex_kwargs.pop("environment", "tabularx")
+    if environment == "tabularx":
+        to_latex_kwargs.setdefault(
+            "column_format", _default_tabularx_column_format(frame, index)
+        )
+        latex = styler.to_latex(hrules=True, **to_latex_kwargs)
+        latex = latex.replace(r"\begin{tabular}", r"\begin{tabularx}{\textwidth}", 1)
+        latex = latex.replace(r"\end{tabular}", r"\end{tabularx}", 1)
+    else:
+        latex = styler.to_latex(hrules=True, environment=environment, **to_latex_kwargs)
+    if addlinespace:
+        latex = _add_latex_row_spacing(latex)
+    path.write_text(latex)
     _print_snippet(f"\\input{{tables/{name}.tex}}", name, caption, environment="table")
     return path

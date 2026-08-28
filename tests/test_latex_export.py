@@ -60,12 +60,15 @@ def test_save_table_writes_booktabs_fragment_without_float_wrapper(
 
     content = path.read_text()
     assert path == tmp_path / "tables" / "demo.tex"
+    assert r"\begin{tabularx}{\textwidth}" in content
+    assert r"\end{tabularx}" in content
     assert r"\toprule" in content
     assert r"\begin{table}" not in content
     # Unescaped labels would not compile: `%` starts a LaTeX comment.
     assert r"25\%" in content
     assert r"a\_\_b" in content
     assert "100,718.00" in content
+    assert r"\addlinespace" not in content
     # The float that wraps the fragment is printed, not written into it.
     printed = capsys.readouterr().out
     assert r"\input{tables/demo.tex}" in printed
@@ -97,6 +100,22 @@ def test_save_table_can_omit_index(
     assert "row label" not in content
     assert "count" in content
     assert "100,718.00" in content
+
+
+def test_save_table_can_add_spacing_between_body_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(latex_export, "THESIS_DIR", tmp_path)
+
+    path = latex_export.save_table(
+        pd.DataFrame({"value": [1.0, 2.0, 3.0]}),
+        "with_addlinespace",
+        addlinespace=True,
+    )
+
+    content = path.read_text()
+    assert content.count(r"\addlinespace") == 2
+    assert content.index(r"\addlinespace") < content.index(r"\bottomrule")
 
 
 def test_missing_thesis_repository_raises(
