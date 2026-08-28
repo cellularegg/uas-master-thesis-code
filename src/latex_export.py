@@ -82,7 +82,9 @@ def save_figure(figure: plt.Figure, name: str, caption: str = "") -> Path:
         FileNotFoundError: If the thesis repository root does not exist.
     """
     path = _artifact_path("figures", f"{name}.pdf")
-    figure.savefig(path, bbox_inches="tight")
+    # Matplotlib otherwise embeds the current time as ``/CreationDate``, which
+    # makes an unchanged figure produce different PDF bytes on every run.
+    figure.savefig(path, bbox_inches="tight", metadata={"CreationDate": None})
     _print_snippet(
         f"\\includegraphics[width=\\textwidth]{{figures/{name}.pdf}}",
         name,

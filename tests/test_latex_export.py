@@ -30,6 +30,25 @@ def test_save_figure_writes_pdf_and_prints_its_float(
         plt.close(figure)
 
 
+def test_save_figure_omits_time_varying_pdf_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(latex_export, "THESIS_DIR", tmp_path)
+    figure, axis = plt.subplots()
+    axis.plot([1.0, 2.0], [3.0, 4.0])
+
+    try:
+        path = latex_export.save_figure(figure, "stable")
+        first_bytes = path.read_bytes()
+
+        latex_export.save_figure(figure, "stable")
+
+        assert b"/CreationDate" not in first_bytes
+        assert path.read_bytes() == first_bytes
+    finally:
+        plt.close(figure)
+
+
 def test_save_table_writes_booktabs_fragment_without_float_wrapper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
