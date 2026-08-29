@@ -188,8 +188,10 @@ def save_table(
     path = _artifact_path("tables", f"{name}.tex")
     math_mode = to_latex_kwargs.pop("math_mode", False)
     styler = frame.style.format(escape="latex", thousands=",", precision=2)
-    for axis in (0, 1):
-        styler = styler.format_index(escape="latex", axis=axis)
+    styler = styler.format_index(escape="latex", axis=0)
+    styler = styler.format_index(
+        formatter=lambda value: f"\\textbf{{{value}}}", escape="latex", axis=1
+    )
     if not index:
         styler = styler.hide(axis="index")
     if math_mode:

@@ -313,6 +313,10 @@ def aggregate_comparison_figure(
                     "array": [standard_deviation],
                     "visible": True,
                 }
+            hovertemplate = "Model=%{x}<br>Value=%{y:.3f}"
+            if phase == "cross_validation":
+                hovertemplate += "<br>Std dev=%{customdata:.3f}"
+            hovertemplate += f"<extra>{_COMPARISON_METRIC_TITLES[metric]}</extra>"
             figure.add_trace(
                 go.Scatter(
                     x=[model],
@@ -323,10 +327,8 @@ def aggregate_comparison_figure(
                     showlegend=plot_number == 1,
                     error_y=error_y,
                     marker={"color": model_colors[model], "size": 9},
-                    hovertemplate=(
-                        "Model=%{x}<br>Value=%{y:.3f}<extra>"
-                        f"{_COMPARISON_METRIC_TITLES[metric]}</extra>"
-                    ),
+                    customdata=[standard_deviation],
+                    hovertemplate=hovertemplate,
                 ),
                 row=row,
                 col=column,

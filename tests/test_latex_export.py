@@ -75,6 +75,20 @@ def test_save_table_writes_booktabs_fragment_without_float_wrapper(
     assert r"\label{tab:demo}" in printed
 
 
+def test_save_table_bolds_column_names_but_not_index_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(latex_export, "THESIS_DIR", tmp_path)
+
+    frame = pd.DataFrame({"a__b": [100718.0, 2.0]}, index=["25%", "50%"])
+
+    path = latex_export.save_table(frame, "demo")
+
+    content = path.read_text()
+    assert r"\textbf{a\_\_b}" in content
+    assert r"\textbf{25\%}" not in content
+
+
 def test_save_table_can_wrap_numbers_in_latex_math_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
