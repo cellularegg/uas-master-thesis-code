@@ -1,6 +1,7 @@
 """Export matplotlib figures and tables into the sibling LaTeX thesis repository."""
 
 import locale
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -147,6 +148,7 @@ def save_table(
     caption: str = "",
     index: bool = True,
     addlinespace: bool = False,
+    math_mode_columns: Sequence[str] = (),
     **to_latex_kwargs: Any,
 ) -> Path:
     r"""Write a DataFrame as an ``\input``-able ``tabularx`` booktabs fragment.
@@ -169,6 +171,8 @@ def save_table(
         index: Whether to include the DataFrame index in the exported table.
         addlinespace: Whether to add ``\addlinespace`` between body rows.
         math_mode: Whether to wrap numeric cell values in LaTeX math delimiters.
+        math_mode_columns: Columns containing LaTeX fragments to wrap in math
+            delimiters without escaping their contents.
         environment: LaTeX table environment, defaulting to ``"tabularx"``.
         column_format: LaTeX column specification. For ``tabularx``, a suitable
             specification is generated when it is omitted.
@@ -194,6 +198,18 @@ def save_table(
             formatter=lambda value: f"${value:,.2f}$",
             subset=numeric_columns,
             escape="latex",
+        )
+    missing_math_columns = set(math_mode_columns).difference(frame.columns)
+    if missing_math_columns:
+        raise ValueError(
+            "Math-mode columns are missing from the table: "
+            f"{sorted(missing_math_columns)}"
+        )
+    if math_mode_columns:
+        styler = styler.format(
+            formatter=lambda value: f"${value}$",
+            subset=list(math_mode_columns),
+            escape=None,
         )
     environment = to_latex_kwargs.pop("environment", "tabularx")
     if environment == "tabularx":
