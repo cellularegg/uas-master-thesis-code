@@ -28,7 +28,7 @@ Run the notebooks directly, or use the equivalent `make` target. The current
 Make dependencies are intentionally asymmetric: `make features` depends on
 `make data`, and any stage-4 training target therefore re-runs fetching,
 preprocessing, and feature engineering. `make evaluate` does not depend on
-training, while `make model_selection` re-runs evaluation first.
+training.
 
 | # | Notebook | `make` target | Output |
 | --- | ---------- | ---------------- | -------- |
@@ -39,23 +39,19 @@ training, while `make model_selection` re-runs evaluation first.
 | 4 | `04_02_train_ridge.ipynb` | `make train-ridge` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
 | 4 | `04_03_train_mlp.ipynb` | `make train-mlp` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
 | 4 | `04_04_train_xgboost.ipynb` | `make train-xgboost` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
-| 4 | `04_05_train_random_forest.ipynb` | `make train-random-forest` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
 | 4 | `04_06_train_extra_trees.ipynb` | `make train-extra-trees` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
 | 4 | `04_07_train_rnn.ipynb` | `make train-rnn` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
-| — | persistence, Ridge, MLP, XGBoost, Extra Trees, and RNN | `make train` | runs the current six-notebook training set; excludes Random Forest |
+| — | persistence, Ridge, MLP, XGBoost, Extra Trees, and RNN | `make train` | runs the current six-notebook training set |
 | 5 | `05_evaluate.ipynb` | `make evaluate` | comparison plots/tables |
-| 6 | `06_model_selection.ipynb` | `make model_selection` (runs 05 + 06) | selected model/run |
 
-All seven `04_*_train_*.ipynb` notebooks share stage number 4: they are parallel
+All six `04_*_train_*.ipynb` notebooks share stage number 4: they are parallel
 model candidates, not sequential steps. The flat-feature candidates use the
 same joined cohort and validation folds; the RNN narrows that cohort further for
 each sequence length. Every fitted model notebook writes a selected model and
-durable manifest to `models/`; persistence has no fitted artifact. The current
-`make train` target excludes Random Forest, which remains available separately
-through `make train-random-forest`. `make evaluate` and `make model_selection`
-assume the desired training notebooks have already been run. If you're starting
-from scratch, run the default pipeline top to bottom with
-`make data features train evaluate model_selection`.
+durable manifest to `models/`; persistence has no fitted artifact. `make
+evaluate` assumes the desired training notebooks have already been run. If
+you're starting from scratch, run the default pipeline top to bottom with
+`make data features train evaluate`.
 
 The active stage-4 notebooks display prediction previews and aggregate/per-horizon
 metrics. They log candidate and sealed-test runs to MLflow; the fitted-model

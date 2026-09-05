@@ -26,7 +26,6 @@ MODEL_EXPERIMENTS: dict[str, str] = {
     "Ridge": "ridge",
     "MLP": "mlp",
     "XGBoost": "xgboost",
-    "Random Forest": "random_forest",
     "Extra Trees": "extra_trees",
     "RNN": "rnn",
 }
@@ -83,13 +82,6 @@ _CANDIDATE_PARAMETERS: dict[str, tuple[str, ...]] = {
         "subsample",
         "colsample_bytree",
         "reg_lambda",
-    ),
-    "random_forest": (
-        "subset",
-        "max_depth",
-        "n_estimators",
-        "min_samples_leaf",
-        "max_features",
     ),
     "extra_trees": (
         "subset",
@@ -831,18 +823,6 @@ def _feature_subset_candidate_key(
             float(str(candidate["colsample_bytree"])),
             float(str(candidate["reg_lambda"])),
         )
-    if experiment_name == "random_forest":
-        from src.random_forest import normalize_candidate_key
-
-        return tuple(
-            normalize_candidate_key(
-                subset=candidate["subset"],
-                max_depth=candidate["max_depth"],
-                n_estimators=candidate["n_estimators"],
-                min_samples_leaf=candidate["min_samples_leaf"],
-                max_features=candidate["max_features"],
-            )
-        )
     if experiment_name == "extra_trees":
         from src.extra_trees import normalize_candidate_key
 
@@ -876,10 +856,6 @@ def _select_feature_subset_candidate_key(
         from src.xgboost_model import select_candidate as select_xgboost_candidate
 
         return tuple(select_xgboost_candidate(candidates, selection_metric))
-    if experiment_name == "random_forest":
-        from src.random_forest import select_candidate as select_random_forest_candidate
-
-        return tuple(select_random_forest_candidate(candidates, selection_metric))
     if experiment_name == "extra_trees":
         from src.extra_trees import select_candidate as select_extra_trees_candidate
 

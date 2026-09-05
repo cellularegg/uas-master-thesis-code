@@ -108,11 +108,6 @@ train-mlp: features
 train-xgboost: features
 	uv run jupyter execute --inplace 04_04_train_xgboost.ipynb
 
-## Train the Random Forest model
-.PHONY: train-random-forest
-train-random-forest: features
-	uv run jupyter execute --inplace 04_05_train_random_forest.ipynb
-
 ## Train the Extra Trees model
 .PHONY: train-extra-trees
 train-extra-trees: features
@@ -126,17 +121,11 @@ train-rnn: features
 ## Train all models
 .PHONY: train
 train: train-persistence train-ridge train-mlp train-xgboost train-extra-trees train-rnn
-# train: train-persistence train-ridge train-mlp train-xgboost train-random-forest train-extra-trees train-rnn
 
 ## Evaluate trained models (assumes `make train` has already been run)
 .PHONY: evaluate
 evaluate:
 	uv run jupyter execute --inplace 05_evaluate.ipynb
-
-## Select the winning model/run
-.PHONY: model_selection
-model_selection: evaluate
-	uv run jupyter execute --inplace 06_model_selection.ipynb
 
 ## Launch the MLflow UI backed by a local SQLite store
 .PHONY: mlflowui

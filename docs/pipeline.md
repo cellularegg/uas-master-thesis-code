@@ -179,7 +179,7 @@ authoritative for a particular run.
 
 ## Stage 4: model training
 
-All seven `04_*` notebooks call reusable logic in `src/`; notebooks retain the
+All six `04_*` notebooks call reusable logic in `src/`; notebooks retain the
 run-specific constants, orchestration, displays, and plots. The shared entry
 point `src.dataset.load_joined_dataset` validates the feature metadata against
 the configured target/horizon, checks both Parquets contain the declared
@@ -220,10 +220,6 @@ The notebooks are:
 - `04_04_train_xgboost.ipynb`: samples a seeded hyperparameter set and reuses it
   for every subset. The native multi-output tree estimator receives raw numeric
   predictors without scaling.
-- `04_05_train_random_forest.ipynb`: samples a seeded hyperparameter set reused
-  across subsets and fits a native multi-output `RandomForestRegressor` on raw
-  numeric predictors without scaling. Run it with `make train-random-forest`;
-  the current aggregate `make train` target intentionally excludes it.
 - `04_06_train_extra_trees.ipynb`: follows the same subset/sampled-search shape
   with a native multi-output `ExtraTreesRegressor`. It uses raw numeric
   predictors; randomized split thresholds provide the estimator's defining

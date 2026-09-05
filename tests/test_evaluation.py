@@ -174,12 +174,12 @@ def test_load_latest_complete_falls_back_from_newest_incomplete_execution() -> N
 def test_load_latest_complete_warns_and_skips_missing_experiment() -> None:
     runs = {"persistence": _execution_runs("persistence", "complete")}
 
-    with pytest.warns(UserWarning, match="random_forest.*not found"):
+    with pytest.warns(UserWarning, match="extra_trees.*not found"):
         result = _load(
             runs,
             experiments={
                 "Persistence": "persistence",
-                "Random Forest": "random_forest",
+                "Extra Trees": "extra_trees",
             },
         )
 

@@ -49,13 +49,13 @@ drops.
 
 One `(ablation subset, hyperparameter)` pair, evaluated across every validation
 fold. Ridge's search is 6 subsets × 5 alphas = 30 candidates; MLP, XGBoost,
-Random Forest, and Extra Trees use their notebook-defined candidate spaces and
-reuse each sampled set across all six subsets. A candidate is *selected* by
-the configured `CV_SELECTION_METRIC` with explicit estimator-specific
+and Extra Trees use their notebook-defined candidate spaces and reuse each
+sampled set across all six subsets. A candidate is *selected* by the
+configured `CV_SELECTION_METRIC` with explicit estimator-specific
 tie-breaking — never by anything the sealed test reported.
 
-`src/ridge.py`, `src/mlp.py`, `src/xgboost_model.py`, `src/random_forest.py`,
-and `src/extra_trees.py` own the candidate-selection policies.
+`src/ridge.py`, `src/mlp.py`, `src/xgboost_model.py`, and `src/extra_trees.py`
+own the candidate-selection policies.
 
 ## execution
 
@@ -68,18 +68,17 @@ it leaves no manifest.
 ## manifest
 
 The durable record of one execution, written once, after the sealed test has
-been scored. Ridge, MLP, XGBoost, Random Forest, and Extra Trees write a
-model-specific JSON manifest carrying the saved model's identity and exact
-input/output contract: estimator and preprocessor identity, the selected
-candidate and hyperparameters, ordered feature and target columns, model path,
-and `execution_uuid`. It contains no CV table, sealed-test metrics, or other
+been scored. Ridge, MLP, XGBoost, and Extra Trees write a model-specific JSON
+manifest carrying the saved model's identity and exact input/output contract:
+estimator and preprocessor identity, the selected candidate and
+hyperparameters, ordered feature and target columns, model path, and
+`execution_uuid`. It contains no CV table, sealed-test metrics, or other
 regime, cohort, and training diagnostics. Those diagnostics remain in MLflow,
 which is the durable scientific record of the training and evaluation results;
 the manifest is the durable record of the serialized model contract.
 
-`src/ridge.py`, `src/mlp.py`, `src/xgboost_model.py`, `src/random_forest.py`,
-and `src/extra_trees.py` expose model-specific save/load helpers and manifest
-types.
+`src/ridge.py`, `src/mlp.py`, `src/xgboost_model.py`, and `src/extra_trees.py`
+expose model-specific save/load helpers and manifest types.
 
 ## target context series
 
