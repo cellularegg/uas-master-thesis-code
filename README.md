@@ -2,7 +2,7 @@
 
 The written thesis itself lives in a separate repository:
 [cellularegg/uas-master-thesis](https://github.com/cellularegg/uas-master-thesis).
-The published PDF can be found here: TBD.
+The PDF can be found here: [cellularegg/uas-master-thesis/releases](https://github.com/cellularegg/uas-master-thesis/releases/).
 
 Code for a master's thesis on short-term forecasting of river water-level
 data, using the [pegelalarm.at](https://pegelalarm.at/en/) API (Austrian

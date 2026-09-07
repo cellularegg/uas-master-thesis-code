@@ -2,6 +2,7 @@
 
 import locale
 from collections.abc import Sequence
+from numbers import Number
 from pathlib import Path
 from typing import Any
 
@@ -142,6 +143,23 @@ def _add_latex_row_spacing(latex: str) -> str:
     return "\n".join(lines) + ("\n" if latex.endswith("\n") else "")
 
 
+def _format_math_mode_value(value: object) -> str:
+    r"""Format a table value inside LaTeX math delimiters.
+
+    Numeric values use the same thousands grouping and two-decimal precision as
+    the default table formatter. Preformatted LaTeX fragments are preserved.
+
+    Args:
+        value: Table cell value to format.
+
+    Returns:
+        The value wrapped in LaTeX math delimiters.
+    """
+    if isinstance(value, Number) and not isinstance(value, bool):
+        return f"${value:,.2f}$"
+    return f"${value}$"
+
+
 def save_table(
     frame: pd.DataFrame,
     name: str,
@@ -209,7 +227,7 @@ def save_table(
         )
     if math_mode_columns:
         styler = styler.format(
-            formatter=lambda value: f"${value}$",
+            formatter=_format_math_mode_value,
             subset=list(math_mode_columns),
             escape=None,
         )

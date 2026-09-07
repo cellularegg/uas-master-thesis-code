@@ -120,6 +120,25 @@ def test_save_table_can_wrap_selected_column_in_latex_math_mode(
     assert r"\textbackslash infty" not in content
 
 
+def test_save_table_rounds_numeric_math_mode_columns_to_two_decimals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(latex_export, "THESIS_DIR", tmp_path)
+
+    frame = pd.DataFrame({"metric": [1.9, 100718.0]})
+
+    path = latex_export.save_table(
+        frame,
+        "rounded_math_column",
+        index=False,
+        math_mode_columns=("metric",),
+    )
+
+    content = path.read_text()
+    assert "$1.90$" in content
+    assert "$100,718.00$" in content
+
+
 def test_save_table_can_omit_index(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
