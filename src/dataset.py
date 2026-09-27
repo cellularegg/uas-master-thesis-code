@@ -44,6 +44,15 @@ class JoinedDataset:
         raw_row_counts: Row counts of the unfiltered train and test artifacts.
         target_context_series: Timestamp-indexed target-station water level and
             imputation flag across both artifacts.
+        target_train_history: Unfiltered training target levels and imputation
+            flags, indexed by UTC timestamp. Time-series adapters must restore
+            imputed values to missing before applying a causal fill policy.
+        target_test_history: Separate unfiltered test history, revealed only
+            through the current issue time during rolling forecasts.
+        predictor_train_history: Unfiltered UTC-indexed training predictors,
+            independent of future-target eligibility.
+        predictor_test_history: Separate unfiltered test predictors for causal
+            state updates as issue times become available.
         target_water_level_quartile_cutoffs_cm: Training-reference Q25, Q50,
             and Q75 target water-level cutoffs in centimetres.
         target_water_level_quartile_reference_count: Number of finite,
@@ -59,6 +68,10 @@ class JoinedDataset:
     input_hashes: dict[str, str]
     raw_row_counts: dict[str, int]
     target_context_series: pd.DataFrame
+    target_train_history: pd.DataFrame
+    target_test_history: pd.DataFrame
+    predictor_train_history: pd.DataFrame
+    predictor_test_history: pd.DataFrame
     target_water_level_quartile_cutoffs_cm: tuple[float, float, float]
     target_water_level_quartile_reference_count: int
 
@@ -138,9 +151,22 @@ def load_joined_dataset(
         },
         raw_row_counts={"train": len(train_features), "test": len(test_features)},
         target_context_series=target_context_series,
+        target_train_history=_target_history_frame(train_features, contract),
+        target_test_history=_target_history_frame(test_features, contract),
+        predictor_train_history=_predictor_history_frame(train_features, contract),
+        predictor_test_history=_predictor_history_frame(test_features, contract),
         target_water_level_quartile_cutoffs_cm=quartile_cutoffs,
         target_water_level_quartile_reference_count=quartile_reference_count,
     )
+
+
+def _predictor_history_frame(
+    features: pd.DataFrame, contract: JoinedFeatureContract
+) -> pd.DataFrame:
+    """Retain unfiltered predictor availability on the UTC hourly time axis."""
+    frame = features.set_index("timestamp")[list(contract.predictor_columns)].copy()
+    frame.index = pd.DatetimeIndex(pd.to_datetime(frame.index, utc=True))
+    return frame.sort_index().asfreq("h")
 
 
 def _load_joined_training_data(
@@ -396,6 +422,19 @@ def time_series_splits(
             raise ValueError("Validation folds overlap or are out of order")
         previous_validation_end = fold_validation_indices[-1]
     return splits, validation_test_size
+
+
+def _target_history_frame(
+    frame: pd.DataFrame, contract: JoinedFeatureContract
+) -> pd.DataFrame:
+    """Preserve one partition's target history independently of eligibility."""
+    columns = {
+        f"{contract.station_id}__water_level": "water_level",
+        f"{contract.station_id}__imputed": "imputed",
+    }
+    history = frame[["timestamp", *columns]].rename(columns=columns).copy()
+    history["timestamp"] = pd.to_datetime(history["timestamp"], utc=True)
+    return history.set_index("timestamp").sort_index()
 
 
 def _target_context_series(

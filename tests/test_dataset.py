@@ -448,3 +448,45 @@ def test_load_joined_dataset_requires_target_station_context_columns(
 
     with pytest.raises(ValueError, match="missing target-station context columns"):
         _load(paths)
+
+
+def test_target_histories_preserve_unfiltered_partitions(tmp_path: Path) -> None:
+    paths = _write_artifacts(tmp_path)
+    train = pd.read_parquet(paths[1])
+    test = pd.read_parquet(paths[2])
+    excluded_time = train.iloc[5]["timestamp"]
+    train.loc[5, "station-b__water_level"] = np.nan
+    train.to_parquet(paths[1], index=False)
+    loaded = _load(paths)
+    assert excluded_time not in set(loaded.train_rows["timestamp"])
+    assert excluded_time in loaded.target_train_history.index
+    assert len(loaded.target_train_history) == len(train)
+    assert len(loaded.target_test_history) == len(test)
+    assert (
+        loaded.target_train_history.index.max() < loaded.target_test_history.index.min()
+    )
+    assert list(loaded.target_train_history.columns) == ["water_level", "imputed"]
+    assert str(loaded.target_train_history.index.tz) == "UTC"
+
+
+def test_predictor_histories_keep_ineligible_rows_and_partition_boundaries(
+    tmp_path: Path,
+) -> None:
+    paths = _write_artifacts(tmp_path, train_rows=24, test_rows=6)
+    train = pd.read_parquet(paths[1]).sort_values("timestamp").reset_index(drop=True)
+    excluded_time = train.loc[5, "timestamp"]
+    missing_time = train.loc[6, "timestamp"]
+    train.loc[5, "station-a__target_valid"] = False
+    train.loc[7, "station-b__precipitation"] = np.nan
+    train.drop(index=6).to_parquet(paths[1], index=False)
+    dataset = _load(paths)
+    history = dataset.predictor_train_history
+    assert list(history.columns) == list(dataset.contract.predictor_columns)
+    assert excluded_time not in set(dataset.train_rows["timestamp"])
+    assert history.loc[excluded_time].notna().all()
+    assert history.loc[missing_time].isna().all()
+    assert len(history) == 24
+    assert str(history.index.tz) == "UTC"
+    assert history.index[-1] < dataset.predictor_test_history.index[0]
+    assert "station-a__target_valid" not in history
+    assert not set(dataset.contract.target_columns).intersection(history.columns)

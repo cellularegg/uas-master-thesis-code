@@ -20,6 +20,9 @@ from src.feature_engineering import (
     is_log1p_eligible_base_name,
     log1p_eligible_columns,
     target_column_names,
+    target_feature_lookback_hours,
+    target_level_features,
+    utc_calendar_features,
     write_feature_artifacts,
     write_joined_feature_artifacts,
 )
@@ -548,3 +551,44 @@ def test_log1p_eligible_columns_strips_station_prefix_and_preserves_order() -> N
         "station-b__water_level_lag_3h",
         "water_level_rolling_mean_6h",
     ]
+
+
+def test_target_level_features_on_trailing_windows_match_full_series() -> None:
+    rng = np.random.default_rng(5)
+    rows = 600
+    levels = pd.DataFrame({"a": 200 + np.cumsum(rng.normal(scale=3.0, size=rows))})
+    imputed = pd.DataFrame({"a": rng.random(rows) < 0.05})
+    levels.loc[[100, 101], "a"] = np.nan
+    full = target_level_features(levels, imputed)
+    lookback = target_feature_lookback_hours()
+    assert lookback == 72
+    issues = np.arange(lookback, rows)
+    offsets = np.arange(-lookback, 1)[:, None]
+    windows = target_level_features(
+        pd.DataFrame(levels["a"].to_numpy()[issues + offsets]),
+        pd.DataFrame(imputed["a"].to_numpy()[issues + offsets]),
+    )
+    assert list(windows) == list(full)
+    for name, values in full.items():
+        np.testing.assert_allclose(
+            windows[name].iloc[-1].to_numpy(dtype=float),
+            values["a"].iloc[issues].to_numpy(dtype=float),
+            rtol=1e-10,
+            atol=1e-9,
+            err_msg=name,
+        )
+
+
+def test_stage3_uses_shared_target_level_and_calendar_features() -> None:
+    frame = _station_frame()
+    frame.loc[[30, 31], "imputed"] = True
+    result = build_feature_frame(frame, station_id="station-at")
+    shared = target_level_features(frame[["water_level"]], frame[["imputed"]])
+    calendar = utc_calendar_features(frame["timestamp"])
+    assert set(shared) | set(calendar) <= set(feature_column_names())
+    for name, values in shared.items():
+        pd.testing.assert_series_equal(
+            result[name], values.iloc[:, 0], check_names=False, check_exact=True
+        )
+    for name, calendar_values in calendar.items():
+        np.testing.assert_array_equal(result[name], calendar_values)

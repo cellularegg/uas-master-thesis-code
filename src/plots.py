@@ -2111,3 +2111,90 @@ def _forecast_window_layout(window_row: pd.Series, label: str) -> dict:
             }
         ],
     }
+
+
+def arima_correlation_figure(history: pd.Series, *, lags: int = 48) -> plt.Figure:
+    """Plot ACF/PACF of a complete training segment and its first differences.
+
+    Args:
+        history: Finite consecutive hourly training values, never test data.
+        lags: Requested lag count, reduced to the sample-supported PACF limit.
+
+    Returns:
+        Four-panel figure with hour-based lag axes and the training date range.
+
+    Raises:
+        ValueError: If the history is incomplete, non-hourly, or too short.
+    """
+    from statsmodels.graphics.tsaplots import (  # type: ignore[import-untyped]
+        plot_acf,
+        plot_pacf,
+    )
+
+    if not isinstance(lags, int) or lags < 1:
+        raise ValueError("lags must be a positive integer")
+    if len(history) < 6 or not np.isfinite(history.to_numpy(dtype=float)).all():
+        raise ValueError("ACF/PACF requires at least six finite training values")
+    if not isinstance(history.index, pd.DatetimeIndex) or not history.index.equals(
+        pd.date_range(history.index[0], history.index[-1], freq="h")
+    ):
+        raise ValueError("ACF/PACF history must be consecutive hourly observations")
+    figure, axes = plt.subplots(2, 2, figsize=(12, 7), constrained_layout=True)
+    for row, (label, series) in enumerate(
+        (("Water level", history), ("First difference", history.diff().dropna()))
+    ):
+        actual_lags = min(lags, len(series) // 2 - 1)
+        for column, (kind, plotter) in enumerate(
+            (("ACF", plot_acf), ("PACF", plot_pacf))
+        ):
+            axis = axes[row, column]
+            title = f"{label}: {kind}"
+            if np.ptp(series.to_numpy()) == 0:
+                axis.text(0.5, 0.5, "Undefined for a constant series", ha="center")
+                axis.set_title(title)
+            else:
+                kwargs = {"method": "ywm"} if kind == "PACF" else {"fft": True}
+                plotter(
+                    series.to_numpy(), lags=actual_lags, ax=axis, title=title, **kwargs
+                )
+            axis.set_xlabel("Lag (hours)")
+    figure.suptitle(
+        f"Training-only correlations: {history.index[0]:%Y-%m-%d %H:%M} – "
+        f"{history.index[-1]:%Y-%m-%d %H:%M} UTC ({len(history):,} hours)"
+    )
+    return figure
+
+
+def arima_search_figure(
+    comparison: pd.DataFrame, *, metric: str = "rmse"
+) -> plt.Figure:
+    """Plot complete-fold ARIMA scores grouped by intercept.
+
+    Args:
+        comparison: Candidate comparison table including failed configurations.
+        metric: Aggregate CV selection metric, mae or rmse.
+
+    Returns:
+        Candidate score scatter plot, with failures counted in the title.
+
+    Raises:
+        ValueError: If the metric is unsupported or no scores are available.
+    """
+    if metric not in {"mae", "rmse"}:
+        raise ValueError("ARIMA search metric must be mae or rmse")
+    scores = comparison.loc[comparison["status"].eq("ok")]
+    if scores.empty:
+        raise ValueError("No successful ARIMA candidates to plot")
+    figure, axis = plt.subplots(figsize=(12, 5))
+    for intercept, group in scores.groupby("intercept", sort=True):
+        axis.scatter(
+            group.index, group[f"cv_{metric}_mean"], label=str(intercept), alpha=0.7
+        )
+    axis.set(
+        xlabel="Candidate index",
+        ylabel=f"Mean CV {metric.upper()} (cm)",
+        title=f"ARIMA search — {len(comparison) - len(scores)} failed candidates",
+    )
+    axis.legend(title="Intercept")
+    figure.tight_layout()
+    return figure

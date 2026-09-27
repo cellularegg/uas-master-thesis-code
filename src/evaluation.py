@@ -26,6 +26,8 @@ MODEL_EXPERIMENTS: dict[str, str] = {
     "Ridge": "ridge",
     "MLP": "mlp",
     "XGBoost": "xgboost",
+    "ARIMA": "arima",
+    "ARIMAX": "arimax",
     "Extra Trees": "extra_trees",
     "RNN": "rnn",
 }
@@ -72,6 +74,8 @@ FEATURE_SUBSET_CV_COLUMNS = [
 
 _CANDIDATE_PARAMETERS: dict[str, tuple[str, ...]] = {
     "persistence": ("persistence_column",),
+    "arima": ("order", "intercept"),
+    "arimax": ("subset", "p", "d", "q"),
     "ridge": ("subset", "alpha", "log1p"),
     "mlp": ("subset", "alpha", "hidden_layer_sizes"),
     "xgboost": (
@@ -128,6 +132,290 @@ class _RegimeDefinition:
     quartile_cutoffs_cm: tuple[float, float, float]
     quartile_reference_count: int
     alarm_threshold_cm: float
+
+
+@dataclass(frozen=True)
+class SavedModelReview:
+    """Read-only diagnostics for one manifest-linked training execution."""
+
+    execution_uuid: str
+    candidates: pd.DataFrame
+    selected_candidate: pd.Series
+    cv_horizons: pd.DataFrame
+    test_aggregate: pd.DataFrame
+    test_horizons: pd.DataFrame
+    regime_aggregate: pd.DataFrame
+    regime_horizons: pd.DataFrame
+    sealed_run_id: str
+
+
+def verify_saved_forecast_metrics(
+    review: SavedModelReview,
+    aggregate: pd.DataFrame,
+    horizons: pd.DataFrame,
+    regime_aggregate: pd.DataFrame,
+    regime_horizons: pd.DataFrame,
+) -> None:
+    """Require independently scored saved forecasts to match logged test metrics.
+
+    Args:
+        review: Manifest-linked MLflow diagnostic record.
+        aggregate: Recomputed aggregate metrics.
+        horizons: Recomputed metrics by forecast horizon.
+        regime_aggregate: Recomputed quartile and alarm aggregate metrics.
+        regime_horizons: Recomputed regime metrics by horizon.
+
+    Raises:
+        ValueError: If any recorded score differs from the saved-model score.
+    """
+    for label, actual, recorded, keys, metrics in (
+        ("aggregate", aggregate, review.test_aggregate, [], METRIC_NAMES),
+        ("horizon", horizons, review.test_horizons, ["horizon_hours"], METRIC_NAMES),
+        (
+            "regime aggregate",
+            regime_aggregate,
+            review.regime_aggregate,
+            ["regime"],
+            ("scored_values", "mae", "rmse", "me"),
+        ),
+        (
+            "regime horizon",
+            regime_horizons,
+            review.regime_horizons,
+            ["regime", "horizon_hours"],
+            ("scored_values", "mae", "rmse", "me"),
+        ),
+    ):
+        current = actual.sort_values(keys).reset_index(drop=True) if keys else actual
+        logged = recorded.sort_values(keys).reset_index(drop=True) if keys else recorded
+        if len(current) != len(logged) or any(
+            current[key].tolist() != logged[key].tolist() for key in keys
+        ):
+            raise ValueError(f"Saved-model {label} cohort differs from MLflow")
+        for metric in metrics:
+            if not np.allclose(
+                current[metric].to_numpy(dtype=float),
+                logged[metric].to_numpy(dtype=float),
+                rtol=1e-6,
+                atol=1e-6,
+                equal_nan=True,
+            ):
+                raise ValueError(f"Saved-model {label} {metric} differs from MLflow")
+
+
+def load_saved_model_review(
+    experiment_name: Literal["arima", "arimax"],
+    execution_uuid: str,
+    *,
+    input_hashes: Mapping[str, str],
+    forecast_horizon_hours: int,
+    scored_issue_times: int,
+    selected_parameters: Mapping[str, str],
+    quartile_cutoffs_cm: Sequence[float],
+    quartile_reference_count: int,
+    alarm_threshold_cm: float,
+    client: MlflowClient | None = None,
+) -> SavedModelReview:
+    """Read and validate the exact saved execution's CV and test diagnostics.
+
+    Args:
+        experiment_name: ARIMA or ARIMAX experiment.
+        execution_uuid: Identifier read from the validated model manifest.
+        input_hashes: Current joined Parquet hashes.
+        forecast_horizon_hours: Current target horizon count.
+        scored_issue_times: Current eligible sealed-test cohort size.
+        selected_parameters: Saved model's candidate identity as MLflow strings.
+        quartile_cutoffs_cm: Current training-reference quartiles.
+        quartile_reference_count: Current training-reference population size.
+        alarm_threshold_cm: Current alarm threshold snapshot.
+        client: Optional read-only MLflow client.
+
+    Returns:
+        Candidate table, selected CV and test metrics, and regime tables.
+
+    Raises:
+        ValueError: If the execution, provenance, candidate, or metrics are incomplete.
+    """
+    if experiment_name not in {"arima", "arimax"} or not execution_uuid:
+        raise ValueError(
+            "A supported experiment and nonempty execution_uuid are required"
+        )
+    mlflow_client = client or MlflowClient()
+    experiment = mlflow_client.get_experiment_by_name(experiment_name)
+    if experiment is None:
+        raise ValueError(f"MLflow experiment {experiment_name!r} was not found")
+    runs = list(
+        mlflow_client.search_runs(
+            experiment_ids=[experiment.experiment_id],
+            filter_string="attributes.status = 'FINISHED'",
+            max_results=10000,
+        )
+    )
+    linked = [
+        run for run in runs if run.data.tags.get("execution_uuid") == execution_uuid
+    ]
+    sealed = [run for run in linked if run.data.tags.get("run_type") == "sealed_test"]
+    candidates = [
+        run for run in linked if run.data.tags.get("run_type") == "candidate_parent"
+    ]
+    if len(sealed) != 1 or not candidates:
+        raise ValueError(
+            f"Execution {execution_uuid!r} requires exactly one finished sealed_test "
+            f"and at least one candidate_parent run; found {len(sealed)} and {len(candidates)}"
+        )
+    sealed_run = sealed[0]
+    expected_candidate_count = _positive_integer_parameter(
+        sealed_run, "candidate_count"
+    )
+    if len(candidates) != expected_candidate_count:
+        raise ValueError(
+            f"Execution {execution_uuid!r} has {len(candidates)} finished candidates; "
+            f"sealed_test records {expected_candidate_count}"
+        )
+    expected_provenance = {
+        **input_hashes,
+        "forecast_horizon_hours": str(forecast_horizon_hours),
+    }
+    for run in [sealed_run, *candidates]:
+        for name, expected in expected_provenance.items():
+            if _required_parameter(run, name) != str(expected):
+                raise ValueError(f"MLflow run {run.info.run_id} disagrees on {name}")
+    if (
+        _positive_integer_parameter(sealed_run, "scored_issue_times")
+        != scored_issue_times
+    ):
+        raise ValueError(
+            "MLflow sealed_test scored_issue_times disagrees with current cohort"
+        )
+    for name, expected in selected_parameters.items():
+        if _required_parameter(sealed_run, name) != expected:
+            raise ValueError(f"Saved model and sealed_test disagree on {name}")
+    _required_finite_metrics(
+        sealed_run,
+        _sealed_test_metric_names(forecast_horizon_hours),
+        run_label="sealed_test",
+    )
+    rows: list[dict[str, object]] = []
+    selected_run: Run | None = None
+    for run in candidates:
+        status = run.data.tags.get("status")
+        if status not in {"ok", "failed"}:
+            raise ValueError(f"Candidate {run.info.run_id} has no valid status tag")
+        parameters = {
+            name: _required_parameter(run, name) for name in selected_parameters
+        }
+        matches = parameters == dict(selected_parameters)
+        if matches:
+            if status != "ok" or selected_run is not None:
+                raise ValueError("Selected candidate is failed or duplicated")
+            selected_run = run
+        if status == "ok":
+            _required_finite_metrics(
+                run,
+                _cv_metric_names(forecast_horizon_hours),
+                run_label=f"candidate_parent {run.info.run_id}",
+            )
+        row: dict[str, object] = {
+            "run_id": run.info.run_id,
+            "status": status,
+            "selected": matches,
+            **run.data.params,
+        }
+        row.update(run.data.metrics)
+        rows.append(row)
+    if selected_run is None:
+        raise ValueError("No successful candidate_parent matches the saved model")
+    if len(rows) != len(
+        {tuple(row[name] for name in selected_parameters) for row in rows}
+    ):
+        raise ValueError("Execution contains duplicate candidate identities")
+    definition = _extract_regime_definition(sealed_run)
+    if definition is None:
+        raise ValueError("sealed_test is missing regime provenance")
+    if (
+        not np.allclose(
+            definition.quartile_cutoffs_cm, quartile_cutoffs_cm, rtol=0, atol=1e-9
+        )
+        or definition.quartile_reference_count != quartile_reference_count
+        or not np.isclose(
+            definition.alarm_threshold_cm, alarm_threshold_cm, rtol=0, atol=1e-9
+        )
+    ):
+        raise ValueError("sealed_test regime provenance disagrees with current dataset")
+    execution = _CompleteExecution(
+        model=experiment_name.upper(),
+        experiment_name=experiment_name,
+        execution_uuid=execution_uuid,
+        candidate_run=selected_run,
+        candidate_runs=tuple(candidates),
+        sealed_run=sealed_run,
+        train_input_sha256=input_hashes["train_input_sha256"],
+        test_input_sha256=input_hashes["test_input_sha256"],
+        forecast_horizon_hours=forecast_horizon_hours,
+        cohort_row_count=scored_issue_times,
+        regime_definition=definition,
+    )
+    regime_rows = _regime_comparison_rows(execution, forecast_horizon_hours)
+    if len(regime_rows) != 5 * (forecast_horizon_hours + 1) * 3:
+        raise ValueError("sealed_test is missing quartile or alarm metrics")
+    regime_frame = pd.DataFrame(regime_rows)
+
+    def regime_table(scope: str) -> pd.DataFrame:
+        frame = regime_frame.loc[regime_frame["scope"].eq(scope)]
+        index = ["regime", "scored_values"]
+        if scope == "horizon":
+            index.insert(1, "horizon")
+        return (
+            frame.pivot(index=index, columns="metric", values="value")
+            .reset_index()
+            .rename_axis(columns=None)
+        )
+
+    selected_metrics = selected_run.data.metrics
+    test_metrics = sealed_run.data.metrics
+    cv_horizons = pd.DataFrame(
+        [
+            {
+                "horizon_hours": horizon,
+                **{
+                    f"{metric}_{statistic}": selected_metrics[
+                        f"cv_{metric}_horizon_{horizon:02d}_{statistic}"
+                    ]
+                    for metric in METRIC_NAMES
+                    for statistic in ("mean", "std")
+                },
+            }
+            for horizon in range(1, forecast_horizon_hours + 1)
+        ]
+    )
+    test_horizons = pd.DataFrame(
+        [
+            {
+                "horizon_hours": horizon,
+                **{
+                    metric: test_metrics[f"test_{metric}_horizon_{horizon:02d}"]
+                    for metric in METRIC_NAMES
+                },
+            }
+            for horizon in range(1, forecast_horizon_hours + 1)
+        ]
+    )
+    selected_row = next(row for row in rows if row["selected"])
+    return SavedModelReview(
+        execution_uuid=execution_uuid,
+        candidates=pd.DataFrame(rows),
+        selected_candidate=pd.Series(selected_row),
+        cv_horizons=cv_horizons,
+        test_aggregate=pd.DataFrame(
+            [{metric: test_metrics[f"test_{metric}"] for metric in METRIC_NAMES}]
+        ),
+        test_horizons=test_horizons,
+        regime_aggregate=regime_table("aggregate"),
+        regime_horizons=regime_table("horizon").rename(
+            columns={"horizon": "horizon_hours"}
+        ),
+        sealed_run_id=sealed_run.info.run_id,
+    )
 
 
 def load_latest_complete_comparison_metrics(
@@ -359,6 +647,7 @@ def _validate_execution(
         run
         for run in candidate_runs
         if run.data.tags.get("execution_uuid") == execution_uuid
+        and run.data.tags.get("status") != "failed"
     )
     selected_candidates = [
         run
@@ -780,7 +1069,7 @@ def _parse_candidate_parameter(name: str, value: str) -> object:
         return value == "True"
     if name == "max_depth":
         return None if value == "None" else int(value)
-    if name in {"n_estimators", "min_samples_leaf"}:
+    if name in {"n_estimators", "min_samples_leaf", "p", "d", "q"}:
         return int(value)
     if name in {
         "alpha",
@@ -799,6 +1088,13 @@ def _feature_subset_candidate_key(
     experiment_name: str, candidate: Mapping[str, object]
 ) -> tuple[object, ...]:
     """Return the canonical candidate key emitted by a model selector."""
+    if experiment_name == "arimax":
+        return (
+            str(candidate["subset"]),
+            int(str(candidate["p"])),
+            int(str(candidate["d"])),
+            int(str(candidate["q"])),
+        )
     if experiment_name == "ridge":
         return (
             str(candidate["subset"]),
@@ -844,6 +1140,10 @@ def _select_feature_subset_candidate_key(
     selection_metric: str,
 ) -> tuple[object, ...]:
     """Apply one model's established selection and tie-breaking policy."""
+    if experiment_name == "arimax":
+        from src.arimax import select_candidate as select_arimax_candidate
+
+        return select_arimax_candidate(candidates, selection_metric)
     if experiment_name == "ridge":
         from src.ridge import select_candidate as select_ridge_candidate
 

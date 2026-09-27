@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -177,3 +178,68 @@ def test_missing_thesis_repository_raises(
 
     with pytest.raises(FileNotFoundError, match="absent"):
         latex_export.save_table(pd.DataFrame({"value": [1.0]}), "demo")
+
+
+def _write_notebook(path: Path, cells: list[dict[str, object]]) -> None:
+    path.write_text(json.dumps({"cells": cells}), encoding="utf-8")
+
+
+def test_save_notebook_code_writes_only_code_cells_as_minted_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(latex_export, "THESIS_DIR", tmp_path)
+    notebook_path = tmp_path / "01_example.ipynb"
+    _write_notebook(
+        notebook_path,
+        [
+            {"cell_type": "markdown", "source": ["# Title\n"]},
+            {
+                "cell_type": "code",
+                "source": ["x = 1\n", "print(x)"],
+                "outputs": [{"output_type": "stream", "text": ["1\n"]}],
+            },
+            {"cell_type": "code", "source": ["\n"], "outputs": []},
+            {"cell_type": "code", "source": "# ρ — lag", "outputs": []},
+        ],
+    )
+
+    path = latex_export.save_notebook_code(notebook_path)
+
+    assert path == tmp_path / "code" / "01_example.tex"
+    assert path.read_text(encoding="utf-8") == (
+        "\\section{01\\_example.ipynb}\n"
+        "\n"
+        "\\begin{minted}{python}\n"
+        "x = 1\n"
+        "print(x)\n"
+        "\\end{minted}\n"
+        "\n"
+        "\\begin{minted}{python}\n"
+        "# ρ — lag\n"
+        "\\end{minted}\n"
+    )
+    assert capsys.readouterr().out == "\\input{code/01_example.tex}\n"
+
+
+def test_save_notebook_code_rejects_undefined_unicode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(latex_export, "THESIS_DIR", tmp_path)
+    notebook_path = tmp_path / "example.ipynb"
+    _write_notebook(notebook_path, [{"cell_type": "code", "source": "# ∑∞"}])
+
+    with pytest.raises(ValueError, match="without a LaTeX definition"):
+        latex_export.save_notebook_code(notebook_path)
+
+
+def test_save_unicode_definitions_declares_each_character(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(latex_export, "THESIS_DIR", tmp_path)
+
+    path = latex_export.save_unicode_definitions()
+
+    assert path == tmp_path / "code" / "unicode.tex"
+    assert "\\DeclareUnicodeCharacter{03C1}{\\ensuremath{\\rho}}\n" in path.read_text(
+        encoding="utf-8"
+    )

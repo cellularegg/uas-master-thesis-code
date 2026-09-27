@@ -108,6 +108,11 @@ train-mlp: features
 train-xgboost: features
 	uv run jupyter execute --inplace 04_04_train_xgboost.ipynb
 
+## Train the recursive ARIMA model
+.PHONY: train-arima
+train-arima: features
+	uv run jupyter execute --inplace 04_05_train_arima.ipynb
+
 ## Train the Extra Trees model
 .PHONY: train-extra-trees
 train-extra-trees: features
@@ -118,9 +123,14 @@ train-extra-trees: features
 train-rnn: features
 	uv run jupyter execute --inplace 04_07_train_rnn.ipynb
 
+## Train the recursive ARIMAX model
+.PHONY: train-arimax
+train-arimax: features
+	uv run jupyter execute --inplace 04_08_train_arimax.ipynb
+
 ## Train all models
 .PHONY: train
-train: train-persistence train-ridge train-mlp train-xgboost train-extra-trees train-rnn
+train: train-persistence train-ridge train-mlp train-xgboost train-arima train-extra-trees train-rnn train-arimax
 
 ## Evaluate trained models (assumes `make train` has already been run)
 .PHONY: evaluate

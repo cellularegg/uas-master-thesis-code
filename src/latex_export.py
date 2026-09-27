@@ -1,5 +1,6 @@
-"""Export matplotlib figures and tables into the sibling LaTeX thesis repository."""
+"""Export figures, tables, and notebook code into the sibling LaTeX thesis repository."""
 
+import json
 import locale
 from collections.abc import Sequence
 from numbers import Number
@@ -245,4 +246,121 @@ def save_table(
         latex = _add_latex_row_spacing(latex)
     path.write_text(latex)
     _print_snippet(f"\\input{{tables/{name}.tex}}", name, caption, environment="table")
+    return path
+
+
+# pdflatex has no definition for most non-ASCII characters found in notebook code.
+# ``minted`` passes them through verbatim, so each is declared in a preamble
+# fragment instead of being rewritten in the code.
+_UNICODE_CHARACTER_DEFINITIONS = {
+    "—": r"\textemdash{}",
+    "–": r"\textendash{}",
+    "…": r"\ldots{}",
+    "°": r"\ensuremath{^{\circ}}",
+    "·": r"\ensuremath{\cdot}",
+    "±": r"\ensuremath{\pm}",
+    "−": r"\ensuremath{-}",
+    "≤": r"\ensuremath{\leq}",
+    "≥": r"\ensuremath{\geq}",
+    "⁻": r"\ensuremath{^{-}}",
+    "¹": r"\ensuremath{^{1}}",
+    "²": r"\ensuremath{^{2}}",
+    "ⱼ": r"\ensuremath{_{j}}",
+    "ŷ": r"\ensuremath{\hat{y}}",
+    "β": r"\ensuremath{\beta}",
+    "μ": r"\ensuremath{\mu}",
+    "ρ": r"\ensuremath{\rho}",
+    "σ": r"\ensuremath{\sigma}",
+    "Σ": r"\ensuremath{\Sigma}",
+}
+
+
+def save_unicode_definitions() -> Path:
+    r"""Write ``\DeclareUnicodeCharacter`` lines for characters in notebook code.
+
+    The fragment is ``\input`` from the thesis preamble so exported code with
+    characters such as ``—`` or ``ρ`` compiles under pdflatex.
+
+    Returns:
+        Path of the written fragment, ``code/unicode.tex``.
+
+    Raises:
+        FileNotFoundError: If the thesis repository root does not exist.
+    """
+    path = _artifact_path("code", "unicode.tex")
+    path.write_text(
+        "".join(
+            f"\\DeclareUnicodeCharacter{{{ord(char):04X}}}{{{definition}}}\n"
+            for char, definition in _UNICODE_CHARACTER_DEFINITIONS.items()
+        ),
+        encoding="utf-8",
+    )
+    print("\\input{code/unicode.tex}")
+    return path
+
+
+def save_notebook_code(notebook_path: Path) -> Path:
+    r"""Write a notebook filename and its code cells as a LaTeX section in ``code/``.
+
+    Only code cells are exported, one block per non-empty cell; markdown cells
+    and outputs are dropped. The notebook filename, including its extension,
+    becomes the section title. The thesis preamble must load ``minted``
+    (compile with ``-shell-escape``) and ``\input`` the fragment written by
+    :func:`save_unicode_definitions`. Prints the ``\input`` line to paste into a
+    chapter or appendix.
+
+    Args:
+        notebook_path: Path of the ``.ipynb`` file to export.
+
+    Returns:
+        Path of the written fragment, ``code/{notebook stem}.tex``, overwritten
+        on every run.
+
+    Raises:
+        FileNotFoundError: If the thesis repository root does not exist.
+        ValueError: If a code cell contains a non-ASCII character without a
+            definition, which would fail to compile.
+    """
+    path = _artifact_path("code", f"{notebook_path.stem}.tex")
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    section_title = notebook_path.name
+    latex_special_characters = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    escaped_title = "".join(
+        latex_special_characters.get(character, character)
+        for character in section_title
+    )
+    blocks = []
+    for cell in notebook["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        source = cell["source"]
+        code = "".join(source) if isinstance(source, list) else source
+        code = code.strip("\n")
+        if not code.strip():
+            continue
+        undefined = {
+            char
+            for char in code
+            if not char.isascii() and char not in _UNICODE_CHARACTER_DEFINITIONS
+        }
+        if undefined:
+            raise ValueError(
+                f"{notebook_path.name} contains characters without a LaTeX "
+                f"definition: {sorted(undefined)}"
+            )
+        blocks.append(f"\\begin{{minted}}{{python}}\n{code}\n\\end{{minted}}\n")
+    code = "\n".join(blocks)
+    path.write_text(f"\\section{{{escaped_title}}}\n\n{code}", encoding="utf-8")
+    print(f"\\input{{code/{notebook_path.stem}.tex}}")
     return path

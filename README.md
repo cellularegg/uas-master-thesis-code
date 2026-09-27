@@ -43,12 +43,14 @@ training.
 | 4 | `04_02_train_ridge.ipynb` | `make train-ridge` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
 | 4 | `04_03_train_mlp.ipynb` | `make train-mlp` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
 | 4 | `04_04_train_xgboost.ipynb` | `make train-xgboost` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
+| 4 | `04_05_train_arima.ipynb` | `make train-arima` | training ACF/PACF, explicit-grid ARIMA CV/test metrics, MLflow runs, and saved model/manifest |
 | 4 | `04_06_train_extra_trees.ipynb` | `make train-extra-trees` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
 | 4 | `04_07_train_rnn.ipynb` | `make train-rnn` | metrics, MLflow run hierarchy, and saved model/manifest in `models/` |
-| — | persistence, Ridge, MLP, XGBoost, Extra Trees, and RNN | `make train` | runs the current six-notebook training set |
+| 4 | `04_08_train_arimax.ipynb` | `make train-arimax` | recursive ARIMAX subset/order CV, MLflow runs, and saved model/manifest |
+| — | persistence, Ridge, MLP, XGBoost, ARIMA, Extra Trees, RNN, and ARIMAX | `make train` | runs the current eight-notebook training set |
 | 5 | `05_evaluate.ipynb` | `make evaluate` | comparison plots/tables |
 
-All six `04_*_train_*.ipynb` notebooks share stage number 4: they are parallel
+All eight `04_*_train_*.ipynb` notebooks share stage number 4: they are parallel
 model candidates, not sequential steps. The flat-feature candidates use the
 same joined cohort and validation folds; the RNN narrows that cohort further for
 each sequence length. Every fitted model notebook writes a selected model and
@@ -73,3 +75,25 @@ coordinates are preserved in the raw artifact. The pipeline uses only the
 native `RR` (one-hour precipitation sum) and `T2M` (2 m air temperature)
 parameters, normalized to `precipitation` and `temperature_2m`; see the
 [timeseries API behavior](https://dataset.api.hub.geosphere.at/v1/docs/user-guide/type.html).
+
+ARIMA evaluates recursive multi-step forecasting for each of 48 fixed nonseasonal SARIMAX configurations (p,q ∈ 0..3, d ∈ {0,1}, intercept only when d=0) on the common CV scoring rows. Each fit uses the full observed hourly target history, with imputed hours treated as missing, through the last training issue time plus the 24-hour horizon. The CV winner is selected with the shared tie-breaking selector, refitted under the same rule, and evaluated on the sealed test. Saved models use a schema-5 manifest; older artifacts must be regenerated.
+
+ARIMAX fits a recursive `X(t) → level(t+1)` regression with ARIMA errors. It
+crosses the six existing feature subsets with thirteen nonseasonal orders, using
+the shared eligible training rows, folds, embargo, and sealed test.
+Run `uv run jupyter execute --inplace 04_08_train_arimax.ipynb` to reuse existing
+Stage-3 artifacts; `make train-arimax` also runs the upstream pipeline.
+
+At issue time `t`, observed levels through `t` update the fixed-parameter state
+when the target label and predictor row are available. Forecasts recompute UTC
+calendar predictors for each future input hour and rebuild the target station's
+level, lag, change, rolling, and imputation-count predictors from the forecasts
+with the Stage-3 formulas (`target_level_features`). Upstream levels and weather
+have no forecasts and are held at their issue-time values. No future observations or predictor rows are read. Missing hours
+remain on the time axis, and imputed levels do not update the state. Training-only
+standardization retains every column, including redundant predictors; finite
+nonconverged fits remain eligible and their diagnostics are logged in MLflow.
+The separate `arimax` experiment participates in overall and feature-subset
+evaluation. `models/arimax_<station>.joblib` and its JSON manifest preserve the
+training snapshot and inference contract; test evaluation does not mutate it.
+Saved ARIMAX models use a schema-6 manifest; older artifacts must be regenerated.

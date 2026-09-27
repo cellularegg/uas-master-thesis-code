@@ -12,6 +12,7 @@ from src.evaluation import (
     FEATURE_SUBSET_CV_COLUMNS,
     load_latest_complete_comparison_metrics,
     load_latest_complete_feature_subset_cv_metrics,
+    load_saved_model_review,
 )
 
 METRICS = ("mae", "rmse", "me", "r2")
@@ -37,13 +38,17 @@ class FakeMlflowClient:
     ) -> list[SimpleNamespace]:
         del run_view_type, max_results, order_by, page_token
         run_type = (
-            "sealed_test" if "sealed_test" in filter_string else "candidate_parent"
+            "sealed_test"
+            if "sealed_test" in filter_string
+            else "candidate_parent"
+            if "candidate_parent" in filter_string
+            else None
         )
         return sorted(
             [
                 run
                 for run in self.runs_by_experiment[experiment_ids[0]]
-                if run.data.tags["run_type"] == run_type
+                if (run_type is None or run.data.tags["run_type"] == run_type)
                 and run.info.status == "FINISHED"
             ],
             key=lambda run: run.info.end_time,
@@ -158,6 +163,62 @@ def _load(
         model_experiments=experiments or {"Persistence": "persistence"},
         forecast_horizon_hours=2,
     )
+
+
+def _saved_arima_review(runs: list[SimpleNamespace]) -> object:
+    return load_saved_model_review(
+        "arima",
+        "saved",
+        input_hashes={
+            "train_input_sha256": "train-hash",
+            "test_input_sha256": "test-hash",
+        },
+        forecast_horizon_hours=2,
+        scored_issue_times=100,
+        selected_parameters={
+            "order": "(1, 0, 0)",
+            "intercept": "True",
+        },
+        quartile_cutoffs_cm=(1.0, 2.0, 3.0),
+        quartile_reference_count=100,
+        alarm_threshold_cm=545.0,
+        client=cast(MlflowClient, FakeMlflowClient({"arima": runs})),
+    )
+
+
+def test_saved_review_requires_exact_linked_runs() -> None:
+    with pytest.raises(ValueError, match="exactly one finished sealed_test"):
+        _saved_arima_review([])
+
+
+def test_saved_review_rejects_failed_selected_candidate() -> None:
+    runs = _execution_runs(
+        "arima",
+        "saved",
+        candidate_params={
+            "order": "(1, 0, 0)",
+            "intercept": "True",
+        },
+    )
+    runs[1].data.params["candidate_count"] = "1"
+    runs[0].data.tags["status"] = "failed"
+    with pytest.raises(ValueError, match="Selected candidate is failed"):
+        _saved_arima_review(runs)
+
+
+def test_saved_review_rejects_current_input_mismatch() -> None:
+    runs = _execution_runs(
+        "arima",
+        "saved",
+        candidate_params={
+            "order": "(1, 0, 0)",
+            "intercept": "True",
+        },
+    )
+    runs[1].data.params["train_input_sha256"] = "stale"
+    runs[1].data.params["candidate_count"] = "1"
+    with pytest.raises(ValueError, match="train_input_sha256"):
+        _saved_arima_review(runs)
 
 
 def test_load_latest_complete_falls_back_from_newest_incomplete_execution() -> None:
@@ -435,3 +496,64 @@ def test_load_feature_subset_metrics_marks_model_specific_winner_per_subset() ->
     }
     assert str(result["completed_at_utc"].dtype) == "datetime64[ms, UTC]"
     assert str(result["is_best_within_subset"].dtype) == "boolean"
+
+
+def test_arimax_complete_execution_and_subset_ranking_skip_failed_candidates() -> None:
+    parameters = {
+        "subset": "full",
+        "p": "0",
+        "d": "0",
+        "q": "0",
+        "feature_count": "4",
+        "selection_metric": "rmse",
+    }
+    runs = _execution_runs("arimax", "arimax-execution", candidate_params=parameters)
+    tied = _run(
+        "tied-more-complex",
+        run_type="candidate_parent",
+        execution_uuid="arimax-execution",
+        end_time=1_850,
+        params={**runs[0].data.params, "p": "1"},
+        metrics=_cv_metrics(2),
+    )
+    other_subset = _run(
+        "target-only",
+        run_type="candidate_parent",
+        execution_uuid="arimax-execution",
+        end_time=1_800,
+        params={
+            **runs[0].data.params,
+            "subset": "target_station_full",
+            "feature_count": "2",
+        },
+        metrics=_cv_metrics(2),
+    )
+    failed = _run(
+        "failed",
+        run_type="candidate_parent",
+        execution_uuid="arimax-execution",
+        end_time=1_750,
+        params={**runs[0].data.params, "q": "1"},
+        metrics={},
+    )
+    failed.data.tags["status"] = "failed"
+    all_runs = [*runs, tied, other_subset, failed]
+    overall = _load({"arimax": all_runs}, experiments={"ARIMAX": "arimax"})
+    assert set(overall["model"]) == {"ARIMAX"}
+    assert set(overall["phase"]) == {"cross_validation", "sealed_test"}
+    subsets = load_latest_complete_feature_subset_cv_metrics(
+        client=cast(MlflowClient, FakeMlflowClient({"arimax": all_runs})),
+        model_experiments={"ARIMAX": "arimax"},
+        forecast_horizon_hours=2,
+    )
+    assert len(subsets) == 3
+    assert set(subsets.loc[subsets["is_best_within_subset"], "run_id"]) == {
+        "arimax-execution-candidate",
+        "target-only",
+    }
+    assert (
+        "p=1"
+        in subsets.loc[
+            subsets["run_id"].eq("tied-more-complex"), "candidate_parameters"
+        ].iloc[0]
+    )

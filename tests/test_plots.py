@@ -801,3 +801,17 @@ def test_forecast_window_figures_requires_two_eligible_issue_times() -> None:
 
     with pytest.raises(ValueError, match="at least two issue timestamps"):
         _forecast_window_figures(fixture, short_context)
+
+
+def test_arima_correlations_reduce_lags_and_handle_constant_differences() -> None:
+    history = pd.Series(
+        np.arange(10, dtype=float),
+        index=pd.date_range("2024-01-01", periods=10, freq="h", tz="UTC"),
+    )
+    figure = plots.arima_correlation_figure(history, lags=48)
+    assert len(figure.axes) == 4
+    assert "Undefined" in figure.axes[2].texts[0].get_text()
+    assert "Undefined" in figure.axes[3].texts[0].get_text()
+    plt.close(figure)
+    with pytest.raises(ValueError, match="consecutive hourly"):
+        plots.arima_correlation_figure(history.drop(history.index[4]))

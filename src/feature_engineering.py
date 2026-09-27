@@ -222,6 +222,94 @@ def _validate_feature_input(
         raise ValueError("imputed must be a non-null Boolean column")
 
 
+def target_feature_lookback_hours(
+    config: FeatureConfig = DEFAULT_FEATURE_CONFIG,
+) -> int:
+    """Return how many hours before ``t`` the target-level features read.
+
+    Args:
+        config: Feature configuration defining lags and rolling windows.
+
+    Returns:
+        The largest lag, change offset, or rolling-window extent before ``t``.
+    """
+    return max(
+        *config.lag_hours,
+        *WATER_LEVEL_CHANGE_HOURS,
+        *(window - 1 for window in config.rolling_windows),
+    )
+
+
+def target_level_features(
+    levels: pd.DataFrame,
+    imputed: pd.DataFrame,
+    *,
+    config: FeatureConfig = DEFAULT_FEATURE_CONFIG,
+) -> dict[str, pd.DataFrame]:
+    """Calculate the water-level and imputation predictors of one station.
+
+    Every column of ``levels`` is an independent hourly series; rows are
+    consecutive hours. Stage 3 passes one full station series, and recursive
+    forecasters pass one trailing window per forecast origin, so both share
+    these formulas exactly.
+
+    Args:
+        levels: Hourly water levels, one series per column.
+        imputed: Boolean imputation flags with the same shape and labels.
+        config: Feature configuration defining lags and rolling windows.
+
+    Returns:
+        Unprefixed predictor base names mapped to frames shaped like ``levels``.
+        Rolling predictors include the current row, require a complete window,
+        and retain missing values.
+    """
+    features: dict[str, pd.DataFrame] = {"water_level": levels, "imputed": imputed}
+    for hours in config.lag_hours:
+        features[f"water_level_lag_{hours}h"] = levels.shift(hours)
+    for hours in WATER_LEVEL_CHANGE_HOURS:
+        features[f"water_level_change_{hours}h"] = levels - levels.shift(hours)
+    for statistic in ("mean", "std", "min", "max"):
+        for window in config.rolling_windows:
+            rolling = levels.rolling(window, min_periods=window)
+            if statistic == "std":
+                values = rolling.std(ddof=0)
+            else:
+                values = getattr(rolling, statistic)()
+            features[f"water_level_rolling_{statistic}_{window}h"] = values
+    for window in config.rolling_windows:
+        features[f"imputed_count_{window}h"] = imputed.rolling(
+            window, min_periods=window
+        ).sum()
+    return features
+
+
+def utc_calendar_features(
+    timestamps: pd.Series, *, config: FeatureConfig = DEFAULT_FEATURE_CONFIG
+) -> dict[str, pd.Series]:
+    """Calculate cyclical UTC calendar predictors for issue timestamps.
+
+    Args:
+        timestamps: Timezone-aware issue times.
+        config: Feature configuration defining the calendar timezone.
+
+    Returns:
+        Calendar predictor names mapped to values aligned with ``timestamps``.
+    """
+    timestamps = timestamps.dt.tz_convert(config.calendar_timezone)
+    hour_angle = 2.0 * math.pi * timestamps.dt.hour / 24.0
+    weekday_angle = 2.0 * math.pi * timestamps.dt.dayofweek / 7.0
+    days_in_year = np.where(timestamps.dt.is_leap_year, 366.0, 365.0)
+    year_angle = 2.0 * math.pi * (timestamps.dt.dayofyear - 1) / days_in_year
+    return {
+        "utc_hour_sin": np.sin(hour_angle),
+        "utc_hour_cos": np.cos(hour_angle),
+        "utc_day_of_week_sin": np.sin(weekday_angle),
+        "utc_day_of_week_cos": np.cos(weekday_angle),
+        "utc_day_of_year_sin": np.sin(year_angle),
+        "utc_day_of_year_cos": np.cos(year_angle),
+    }
+
+
 def build_feature_frame(
     frame: pd.DataFrame,
     *,
@@ -254,24 +342,12 @@ def build_feature_frame(
     )
     result["target_valid"] = valid_targets
 
-    for hours in config.lag_hours:
-        result[f"water_level_lag_{hours}h"] = water_level.shift(hours)
-    for hours in WATER_LEVEL_CHANGE_HOURS:
-        result[f"water_level_change_{hours}h"] = water_level - water_level.shift(hours)
-
-    for statistic in ("mean", "std", "min", "max"):
-        for window in config.rolling_windows:
-            rolling = water_level.rolling(window, min_periods=window)
-            if statistic == "std":
-                values = rolling.std(ddof=0)
-            else:
-                values = getattr(rolling, statistic)()
-            result[f"water_level_rolling_{statistic}_{window}h"] = values
-
-    for window in config.rolling_windows:
-        result[f"imputed_count_{window}h"] = (
-            frame["imputed"].rolling(window, min_periods=window).sum()
-        )
+    target_features = target_level_features(
+        frame[["water_level"]], frame[["imputed"]], config=config
+    )
+    for name, values in target_features.items():
+        if name not in {"water_level", "imputed"}:
+            result[name] = values.iloc[:, 0]
 
     for variable in PRECIPITATION_VARIABLES:
         for window in config.rolling_windows:
@@ -291,17 +367,9 @@ def build_feature_frame(
         24, min_periods=24
     ).max()
 
-    timestamps = frame["timestamp"].dt.tz_convert(config.calendar_timezone)
-    hour_angle = 2.0 * math.pi * timestamps.dt.hour / 24.0
-    weekday_angle = 2.0 * math.pi * timestamps.dt.dayofweek / 7.0
-    days_in_year = np.where(timestamps.dt.is_leap_year, 366.0, 365.0)
-    year_angle = 2.0 * math.pi * (timestamps.dt.dayofyear - 1) / days_in_year
-    result["utc_hour_sin"] = np.sin(hour_angle)
-    result["utc_hour_cos"] = np.cos(hour_angle)
-    result["utc_day_of_week_sin"] = np.sin(weekday_angle)
-    result["utc_day_of_week_cos"] = np.cos(weekday_angle)
-    result["utc_day_of_year_sin"] = np.sin(year_angle)
-    result["utc_day_of_year_cos"] = np.cos(year_angle)
+    calendar = utc_calendar_features(frame["timestamp"], config=config)
+    for name, calendar_values in calendar.items():
+        result[name] = calendar_values
 
     for offset, column in enumerate(target_column_names(config), start=1):
         result[column] = water_level.shift(-offset).where(valid_targets)
