@@ -76,7 +76,7 @@ native `RR` (one-hour precipitation sum) and `T2M` (2 m air temperature)
 parameters, normalized to `precipitation` and `temperature_2m`; see the
 [timeseries API behavior](https://dataset.api.hub.geosphere.at/v1/docs/user-guide/type.html).
 
-ARIMA evaluates recursive multi-step forecasting for each of 48 fixed nonseasonal SARIMAX configurations (p,q ∈ 0..3, d ∈ {0,1}, intercept only when d=0) on the common CV scoring rows. Each fit uses the full observed hourly target history, with imputed hours treated as missing, through the last training issue time plus the 24-hour horizon. The CV winner is selected with the shared tie-breaking selector, refitted under the same rule, and evaluated on the sealed test. Saved models use a schema-5 manifest; older artifacts must be regenerated.
+ARIMA evaluates recursive multi-step forecasting for each of 52 fixed nonseasonal SARIMAX configurations (q ∈ 0..3, d ∈ {0,1}; d=0 with an intercept and p ∈ 1..6, d=1 without one and p ∈ 0..6) on the common CV scoring rows. Each fit uses the full observed hourly target history, with imputed hours treated as missing, through the last training issue time plus the 24-hour horizon. The CV winner is selected with the shared tie-breaking selector, refitted under the same rule, and evaluated on the sealed test. Saved models use a schema-5 manifest; older artifacts must be regenerated.
 
 ARIMAX fits a recursive `X(t) → level(t+1)` regression with ARIMA errors. It
 crosses the six existing feature subsets with thirteen nonseasonal orders, using

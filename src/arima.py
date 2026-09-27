@@ -74,16 +74,19 @@ class ArimaCandidate:
 
 
 def candidate_grid() -> list[ArimaCandidate]:
-    """Return every fixed order with an optional intercept when d is zero.
+    """Return every fixed order, with an intercept exactly when d is zero.
+
+    Level models (d=0) need an intercept for the nonzero mean level and at
+    least one AR term for its persistence.
 
     Returns:
-        Forty-eight candidates: p,q in 0..3 and d in {0, 1}, with and without
-        an intercept for d=0 and without one for d=1.
+        Fifty-two candidates: q in 0..3 and d in {0, 1}, with p in 1..6 and an
+        intercept for d=0 and p in 0..6 without one for d=1.
     """
     return [
-        ArimaCandidate((p, d, q), intercept)
-        for p, d, q in product(range(4), range(2), range(4))
-        for intercept in ((False, True) if d == 0 else (False,))
+        ArimaCandidate((p, d, q), d == 0)
+        for p, d, q in product(range(7), range(2), range(4))
+        if d == 1 or p > 0
     ]
 
 

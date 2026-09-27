@@ -288,12 +288,16 @@ def test_manifest_rejects_mismatch_before_deserialization(
 
 def test_grid_is_complete() -> None:
     grid = candidate_grid()
-    assert len(grid) == len(set(grid)) == 48
+    assert len(grid) == len(set(grid)) == 52
     assert {c.order for c in grid} == {
-        (p, d, q) for p in range(4) for d in range(2) for q in range(4)
+        (p, d, q)
+        for p in range(7)
+        for d in range(2)
+        for q in range(4)
+        if d == 1 or p > 0
     }
-    assert {c.order[1] for c in grid if c.intercept} == {0}
-    assert sum(c.intercept for c in grid) == 16
+    assert all(c.intercept == (c.order[1] == 0) for c in grid)
+    assert sum(c.intercept for c in grid) == 24
 
 
 @pytest.mark.parametrize(
