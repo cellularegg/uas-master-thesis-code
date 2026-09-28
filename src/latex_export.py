@@ -299,14 +299,21 @@ def save_unicode_definitions() -> Path:
     return path
 
 
+# Notebook cell tag marking boilerplate (imports, path constants, dataset
+# loading) that stays in the notebook but is left out of the thesis appendix.
+LATEX_SKIP_TAG = "latex-skip"
+
+
 def save_notebook_code(notebook_path: Path) -> Path:
     r"""Write a notebook filename and its code cells as a LaTeX section in ``code/``.
 
     Only code cells before the notebook's second level-one markdown heading
     (``# ...``) are exported, so a trailing evaluation part is left out; without
-    a second such heading every code cell is exported. Each non-empty code cell
-    becomes one block; markdown cells and outputs are dropped. The notebook
-    filename, including its extension, becomes the section title. The thesis preamble must load ``minted``
+    a second such heading every code cell is exported. Each code cell with
+    Python code becomes one block; empty cells, cells of only IPython magics
+    (``%...``), cells tagged :data:`LATEX_SKIP_TAG`, markdown cells, and
+    outputs are dropped. The notebook filename, including its extension,
+    becomes the section title. The thesis preamble must load ``minted``
     (compile with ``-shell-escape``) and ``\input`` the fragment written by
     :func:`save_unicode_definitions`. Prints the ``\input`` line to paste into a
     chapter or appendix.
@@ -356,8 +363,13 @@ def save_notebook_code(notebook_path: Path) -> Path:
             continue
         if cell["cell_type"] != "code":
             continue
+        if LATEX_SKIP_TAG in cell.get("metadata", {}).get("tags", []):
+            continue
         code = text.strip("\n")
-        if not code.strip():
+        if all(
+            not line.strip() or line.lstrip().startswith("%")
+            for line in code.splitlines()
+        ):
             continue
         undefined = {
             char

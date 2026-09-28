@@ -2,7 +2,7 @@
 
 import json
 import random
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -409,6 +409,23 @@ def build_rnn_estimator(
         batch_size=batch_size,
         random_state=random_state,
         device=device,
+    )
+
+
+def sampled_parameter_key(params: Mapping[str, object]) -> tuple[str, int, int, int]:
+    """Return the canonical hyperparameter key of one sampled draw.
+
+    Args:
+        params: One ``ParameterSampler`` draw.
+
+    Returns:
+        ``(cell_type, sequence_length, hidden_size, num_layers)``.
+    """
+    return (
+        str(params["cell_type"]),
+        int(params["sequence_length"]),  # type: ignore[call-overload]
+        int(params["hidden_size"]),  # type: ignore[call-overload]
+        int(params["num_layers"]),  # type: ignore[call-overload]
     )
 
 

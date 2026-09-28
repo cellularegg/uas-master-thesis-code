@@ -353,3 +353,12 @@ def test_build_mlp_estimator_is_reproducible_with_a_fixed_random_state() -> None
     second.fit(predictors, targets)
 
     np.testing.assert_allclose(first.predict(predictors), second.predict(predictors))
+
+
+def test_sampled_parameter_key_formats_layers_and_alpha() -> None:
+    key = mlp.sampled_parameter_key(
+        {"hidden_layer_sizes": (64, 32), "alpha": np.float64(0.01)}
+    )
+
+    assert key == (mlp.format_hidden_layer_sizes((64, 32)), 0.01)
+    assert type(key[1]) is float

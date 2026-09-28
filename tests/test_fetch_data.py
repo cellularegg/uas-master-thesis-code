@@ -1,16 +1,21 @@
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import pytest
 import requests
 
+from src import fetch_data
 from src.fetch_data import (
     GEOSPHERE_INCA_URL,
     fetch_hourly_history,
     fetch_inca,
     flatten_station_catalog,
     hourly_chunks,
+    load_or_fetch_catalog,
+    load_or_fetch_water_history,
+    load_or_fetch_weather_history,
     resolve_station_coordinates,
 )
 
@@ -280,3 +285,132 @@ def test_catalog_flattens_scalars_and_resolves_coordinates() -> None:
 
     assert "measurements" not in catalog
     assert resolve_station_coordinates(catalog, "207241-at") == (47.1, 14.2)
+
+
+class StubCatalogApi:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def query_current_data(self, *, country_code: str) -> dict[str, Any]:
+        self.calls += 1
+        return {"payload": country_code}
+
+
+def test_load_or_fetch_catalog_fetches_saves_then_reuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = pd.DataFrame({"commonid": ["a"], "latitude": [1.0]})
+    monkeypatch.setattr(fetch_data, "flatten_station_catalog", lambda payload: catalog)
+    api = StubCatalogApi()
+    path = tmp_path / "catalog.parquet"
+
+    fetched = load_or_fetch_catalog(
+        api,  # type: ignore[arg-type]
+        path,
+        country_code="AT",
+        skip_if_exists=True,
+    )
+    reused = load_or_fetch_catalog(
+        api,  # type: ignore[arg-type]
+        path,
+        country_code="AT",
+        skip_if_exists=True,
+    )
+
+    assert api.calls == 1
+    pd.testing.assert_frame_equal(fetched, catalog)
+    pd.testing.assert_frame_equal(reused, catalog)
+
+
+def test_load_or_fetch_water_history_fetches_from_archive_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 2, tzinfo=UTC)
+    history = pd.DataFrame({"sourceDate": ["2024-01-01T00:00:00Z"], "value": [1.0]})
+    calls: list[tuple[object, ...]] = []
+
+    def fake_fetch_hourly_history(*args: object, **kwargs: object) -> pd.DataFrame:
+        calls.append((*args, kwargs))
+        return history
+
+    monkeypatch.setattr(fetch_data, "find_archive_start", lambda *args, **kw: start)
+    monkeypatch.setattr(fetch_data, "fetch_hourly_history", fake_fetch_hourly_history)
+    path = tmp_path / "water.parquet"
+
+    water = load_or_fetch_water_history(
+        object(),  # type: ignore[arg-type]
+        "station",
+        path,
+        end=end,
+        unit="cm",
+        granularity="hour",
+        skip_if_exists=True,
+    )
+
+    assert calls[0][1:4] == ("station", start, end)
+    assert calls[0][4] == {"unit": "cm", "granularity": "hour"}
+    pd.testing.assert_frame_equal(water, history)
+    pd.testing.assert_frame_equal(pd.read_parquet(path), history)
+
+
+def test_load_or_fetch_weather_history_spans_the_water_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    water = pd.DataFrame(
+        {"sourceDate": ["2024-01-01T05:00:00Z", "2024-01-01T01:00:00Z"]}
+    )
+    weather = pd.DataFrame({"precipitation": [0.0]})
+    calls: list[tuple[object, ...]] = []
+
+    def fake_fetch_inca(*args: object) -> pd.DataFrame:
+        calls.append(args)
+        return weather
+
+    monkeypatch.setattr(
+        fetch_data, "resolve_station_coordinates", lambda catalog, sid: (48.0, 14.0)
+    )
+    monkeypatch.setattr(fetch_data, "fetch_inca", fake_fetch_inca)
+
+    result = load_or_fetch_weather_history(
+        "station",
+        tmp_path / "weather.parquet",
+        catalog=pd.DataFrame(),
+        water=water,
+        skip_if_exists=True,
+    )
+
+    assert calls == [
+        (
+            "station",
+            48.0,
+            14.0,
+            datetime(2024, 1, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 5, tzinfo=UTC),
+        )
+    ]
+    pd.testing.assert_frame_equal(result, weather)
+
+
+@pytest.mark.parametrize(
+    ("catalog", "water", "message"),
+    [
+        (None, pd.DataFrame({"sourceDate": []}), "metadata is unavailable"),
+        (pd.DataFrame(), None, "history is unavailable"),
+        (pd.DataFrame(), pd.DataFrame({"sourceDate": []}), "history is empty"),
+    ],
+)
+def test_load_or_fetch_weather_history_requires_catalog_and_water(
+    tmp_path: Path,
+    catalog: pd.DataFrame | None,
+    water: pd.DataFrame | None,
+    message: str,
+) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        load_or_fetch_weather_history(
+            "station",
+            tmp_path / "weather.parquet",
+            catalog=catalog,
+            water=water,
+            skip_if_exists=True,
+        )

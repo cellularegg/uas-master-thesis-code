@@ -253,6 +253,25 @@ def test_error_boxplots_figure(
     )
 
 
+def loss_curve_figure(epoch_losses: Sequence[float], *, title: str) -> plt.Figure:
+    """Plot a training loss curve by epoch.
+
+    Args:
+        epoch_losses: Mean training loss of each epoch, in order.
+        title: Figure title.
+
+    Returns:
+        A line figure of training MSE (on scaled targets) against epoch number.
+    """
+    figure, axis = plt.subplots(figsize=(8, 4))
+    axis.plot(range(1, len(epoch_losses) + 1), epoch_losses)
+    axis.set_xlabel("Epoch")
+    axis.set_ylabel("Training MSE (scaled targets)")
+    axis.set_title(title)
+    axis.grid(alpha=0.3)
+    return figure
+
+
 def aggregate_comparison_figure(
     comparison_metrics: pd.DataFrame,
     *,

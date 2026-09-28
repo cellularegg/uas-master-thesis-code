@@ -85,6 +85,61 @@ def normalize_candidate_key(
     )
 
 
+def sampled_candidate_key(
+    subset: str, params: Mapping[str, object]
+) -> ExtraTreesCandidateKey:
+    """Normalize one ``ParameterSampler`` draw paired with a feature subset.
+
+    Args:
+        subset: Feature-subset name.
+        params: One sampled draw with ``max_depth``, ``n_estimators``,
+            ``min_samples_leaf``, and ``max_features``.
+
+    Returns:
+        The normalized candidate key, see :func:`normalize_candidate_key`.
+
+    Raises:
+        ValueError: If a value is outside the supported search space.
+    """
+    return normalize_candidate_key(
+        subset=subset,
+        max_depth=params["max_depth"],
+        n_estimators=params["n_estimators"],
+        min_samples_leaf=params["min_samples_leaf"],
+        max_features=params["max_features"],
+    )
+
+
+def candidate_mlflow_params(
+    max_depth: int | None,
+    n_estimators: int,
+    min_samples_leaf: int,
+    max_features: ExtraTreesMaxFeatures,
+    *,
+    bootstrap: bool,
+) -> dict[str, object]:
+    """Describe one Extra Trees hyperparameter set as MLflow params.
+
+    Args:
+        max_depth: Maximum tree depth, or ``None`` for unbounded.
+        n_estimators: Number of trees.
+        min_samples_leaf: Minimum samples per leaf.
+        max_features: Features considered per split.
+        bootstrap: Whether trees are fit on bootstrap samples.
+
+    Returns:
+        String-encoded ``max_depth`` and ``max_features`` plus the numeric
+        hyperparameters and ``bootstrap``.
+    """
+    return {
+        "max_depth": "None" if max_depth is None else str(max_depth),
+        "n_estimators": n_estimators,
+        "min_samples_leaf": min_samples_leaf,
+        "max_features": str(max_features),
+        "bootstrap": bootstrap,
+    }
+
+
 def select_candidate(
     cv_results: pd.DataFrame, metric: str = "rmse"
 ) -> tuple[str, int | None, int, int, ExtraTreesMaxFeatures]:

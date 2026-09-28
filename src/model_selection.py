@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Hashable, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 
 
@@ -28,6 +29,31 @@ def deduplicate_sampled_parameters(
         canonical_key = key(parameters)
         unique_parameters.setdefault(canonical_key, dict(parameters))
     return list(unique_parameters.values())
+
+
+def search_space_summary(
+    distributions: Mapping[str, object],
+) -> tuple[str, int | str]:
+    """Describe a ``ParameterSampler`` search space for MLflow params.
+
+    Args:
+        distributions: Parameter lists or frozen scipy distributions.
+
+    Returns:
+        The search method (``"random_with_replacement"`` when any value is a
+        distribution, else ``"random_without_replacement"``) and the search
+        space size (``"distribution_defined"`` or the grid's product size).
+    """
+    has_distributions = any(hasattr(values, "rvs") for values in distributions.values())
+    method = (
+        "random_with_replacement" if has_distributions else "random_without_replacement"
+    )
+    size: int | str = (
+        "distribution_defined"
+        if has_distributions
+        else int(np.prod([len(values) for values in distributions.values()]))  # type: ignore[arg-type]
+    )
+    return method, size
 
 
 def select_candidate(

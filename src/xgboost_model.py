@@ -45,6 +45,28 @@ _TIE_BREAK_DESCRIPTIONS = [
 ]
 
 
+def sampled_parameter_key(
+    params: Mapping[str, object],
+) -> tuple[int, int, float, float, float, float]:
+    """Return the canonical hyperparameter key of one sampled draw.
+
+    Args:
+        params: One ``ParameterSampler`` draw.
+
+    Returns:
+        ``(max_depth, n_estimators, learning_rate, subsample, colsample_bytree,
+        reg_lambda)`` as Python scalars.
+    """
+    return (
+        int(params["max_depth"]),  # type: ignore[call-overload]
+        int(params["n_estimators"]),  # type: ignore[call-overload]
+        float(params["learning_rate"]),  # type: ignore[arg-type]
+        float(params["subsample"]),  # type: ignore[arg-type]
+        float(params["colsample_bytree"]),  # type: ignore[arg-type]
+        float(params["reg_lambda"]),  # type: ignore[arg-type]
+    )
+
+
 def select_candidate(
     cv_results: pd.DataFrame, metric: str = "rmse"
 ) -> tuple[str, int, int, float, float, float, float]:

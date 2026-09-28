@@ -485,3 +485,33 @@ def test_score_saved_model_uses_manifest_feature_order(
     assert list(fake_model.predictor_values.columns) == list(
         manifest.selected_feature_columns
     )
+
+
+def test_sampled_candidate_key_normalizes_one_draw() -> None:
+    key = extra_trees.sampled_candidate_key(
+        "full",
+        {
+            "max_depth": None,
+            "n_estimators": np.int64(300),
+            "min_samples_leaf": 2,
+            "max_features": "sqrt",
+        },
+    )
+
+    assert key == ("full", None, 300, 2, "sqrt")
+
+
+def test_candidate_mlflow_params_string_encodes_depth_and_features() -> None:
+    assert extra_trees.candidate_mlflow_params(None, 300, 2, 0.5, bootstrap=False) == {
+        "max_depth": "None",
+        "n_estimators": 300,
+        "min_samples_leaf": 2,
+        "max_features": "0.5",
+        "bootstrap": False,
+    }
+    assert (
+        extra_trees.candidate_mlflow_params(16, 300, 2, "sqrt", bootstrap=True)[
+            "max_depth"
+        ]
+        == "16"
+    )

@@ -199,6 +199,17 @@ def test_save_notebook_code_writes_only_code_cells_as_minted_blocks(
                 "outputs": [{"output_type": "stream", "text": ["1\n"]}],
             },
             {"cell_type": "code", "source": ["\n"], "outputs": []},
+            {
+                "cell_type": "code",
+                "source": ["%load_ext autoreload\n", "%autoreload 2"],
+                "outputs": [],
+            },
+            {
+                "cell_type": "code",
+                "metadata": {"tags": ["latex-skip"]},
+                "source": "import os",
+                "outputs": [],
+            },
             {"cell_type": "code", "source": "# ρ — lag", "outputs": []},
         ],
     )

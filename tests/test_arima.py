@@ -524,3 +524,36 @@ def test_parallel_search_matches_sequential_results(
     assert all(result.fold_details[0]["status"] == "failed" for result in failed)
     with pytest.raises(ValueError, match="every validation fold"):
         select_candidate(candidate_table(failed))
+
+
+def _run_params_dataset() -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        input_hashes={"train_sha256": "a", "test_sha256": "b"},
+        folds=[(np.arange(2), np.arange(2, 3))] * 3,
+        train_rows=pd.DataFrame(index=range(10)),
+        test_rows=pd.DataFrame(index=range(4)),
+        raw_row_counts={"train": 12, "test": 5},
+    )
+
+
+def test_run_params_describes_search_and_data() -> None:
+    params = arima.run_params(
+        _run_params_dataset(),
+        station_id="s-at",
+        forecast_horizon_hours=24,
+        candidate_count=52,
+        n_workers=10,
+        selection_metric="rmse",
+        maxiter=200,
+        initial_train_fraction=0.5,
+        embargo_rows=24,
+    )
+
+    assert params["train_sha256"] == "a"
+    assert params["feature_columns"] == json.dumps(["s-at__water_level"])
+    assert params["n_validation_folds"] == 3
+    assert (params["eligible_train_rows"], params["eligible_test_rows"]) == (10, 4)
+    assert (params["raw_train_rows"], params["raw_test_rows"]) == (12, 5)
+    assert params["update_policy"] == "causal observed-level updates"

@@ -369,3 +369,19 @@ def test_build_xgboost_estimator_is_reproducible_with_a_fixed_random_state() -> 
     second.fit(predictors, targets)
 
     np.testing.assert_allclose(first.predict(predictors), second.predict(predictors))
+
+
+def test_sampled_parameter_key_returns_python_scalars() -> None:
+    key = xgboost_model.sampled_parameter_key(
+        {
+            "max_depth": np.int64(4),
+            "learning_rate": np.float64(0.1),
+            "n_estimators": np.int64(200),
+            "subsample": 0.8,
+            "colsample_bytree": 0.9,
+            "reg_lambda": 1.5,
+        }
+    )
+
+    assert key == (4, 200, 0.1, 0.8, 0.9, 1.5)
+    assert [type(value) for value in key] == [int, int, float, float, float, float]

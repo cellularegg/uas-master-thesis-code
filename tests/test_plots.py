@@ -815,3 +815,15 @@ def test_arima_correlations_reduce_lags_and_handle_constant_differences() -> Non
     plt.close(figure)
     with pytest.raises(ValueError, match="consecutive hourly"):
         plots.arima_correlation_figure(history.drop(history.index[4]))
+
+
+def test_loss_curve_figure_plots_one_point_per_epoch() -> None:
+    figure = plots.loss_curve_figure([3.0, 2.0, 1.5], title="Loss")
+
+    axis = figure.axes[0]
+    x_values, y_values = axis.lines[0].get_data()
+    assert np.asarray(x_values).tolist() == [1, 2, 3]
+    assert np.asarray(y_values).tolist() == [3.0, 2.0, 1.5]
+    assert axis.get_title() == "Loss"
+    assert axis.get_xlabel() == "Epoch"
+    plt.close(figure)

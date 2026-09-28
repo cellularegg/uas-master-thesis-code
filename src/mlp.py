@@ -62,6 +62,21 @@ def parse_hidden_layer_sizes(text: str) -> tuple[int, ...]:
     return tuple(int(size) for size in text.split("x"))
 
 
+def sampled_parameter_key(params: Mapping[str, object]) -> tuple[str, float]:
+    """Return the canonical ``(hidden_layer_sizes label, alpha)`` of one draw.
+
+    Args:
+        params: One ``ParameterSampler`` draw.
+
+    Returns:
+        The formatted hidden-layer sizes and the float alpha.
+    """
+    return (
+        format_hidden_layer_sizes(params["hidden_layer_sizes"]),  # type: ignore[arg-type]
+        float(params["alpha"]),  # type: ignore[arg-type]
+    )
+
+
 def select_candidate(
     cv_results: pd.DataFrame, metric: str = "rmse"
 ) -> tuple[str, tuple[int, ...], float]:

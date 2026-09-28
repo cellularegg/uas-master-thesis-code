@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from io import StringIO
+from pathlib import Path
 from typing import Any, Protocol
 
 import pandas as pd
@@ -270,3 +271,118 @@ def _first_column(frame: pd.DataFrame, candidates: Iterable[str]) -> str:
     raise RuntimeError(
         f"None of the expected metadata columns exist: {', '.join(candidates)}"
     )
+
+
+def load_or_fetch_catalog(
+    api: BasicApiAccess,
+    path: Path,
+    *,
+    country_code: str,
+    skip_if_exists: bool,
+) -> pd.DataFrame:
+    """Read the saved station catalog, or fetch, flatten, and save it.
+
+    Args:
+        api: Authenticated PegelAlarm client.
+        path: Parquet path of the catalog.
+        country_code: Country whose stations are listed.
+        skip_if_exists: Reuse an existing file instead of fetching.
+
+    Returns:
+        The flattened station catalog.
+    """
+    if skip_if_exists and path.exists():
+        catalog = pd.read_parquet(path)
+        print(f"Skipping existing station catalog: {path}")
+    else:
+        payload = api.query_current_data(country_code=country_code)
+        catalog = flatten_station_catalog(payload)
+        catalog.to_parquet(path, index=False)
+        print(f"Saved {len(catalog):,} stations to {path}")
+    return catalog
+
+
+def load_or_fetch_water_history(
+    api: BasicApiAccess,
+    station_id: str,
+    path: Path,
+    *,
+    end: datetime,
+    unit: str,
+    granularity: str,
+    skip_if_exists: bool,
+) -> pd.DataFrame:
+    """Read a saved station water history, or fetch its full archive and save it.
+
+    Args:
+        api: Authenticated PegelAlarm client.
+        station_id: PegelAlarm station identifier.
+        path: Parquet path of the water history.
+        end: Exclusive UTC end of the fetched history.
+        unit: PegelAlarm measurement unit.
+        granularity: PegelAlarm history granularity.
+        skip_if_exists: Reuse an existing file instead of fetching.
+
+    Returns:
+        The station's hourly water history.
+    """
+    if skip_if_exists and path.exists():
+        water = pd.read_parquet(path)
+        print(f"Skipping existing water history: {path}")
+    else:
+        start = find_archive_start(api, station_id, end, unit=unit)
+        water = fetch_hourly_history(
+            api, station_id, start, end, unit=unit, granularity=granularity
+        )
+        water.to_parquet(path, index=False)
+        print(f"Saved {len(water):,} water observations to {path}")
+    return water
+
+
+def load_or_fetch_weather_history(
+    station_id: str,
+    path: Path,
+    *,
+    catalog: pd.DataFrame | None,
+    water: pd.DataFrame | None,
+    skip_if_exists: bool,
+) -> pd.DataFrame:
+    """Read a saved INCA history, or fetch it for the water history's span.
+
+    Args:
+        station_id: PegelAlarm station identifier.
+        path: Parquet path of the weather history.
+        catalog: Station catalog used to resolve coordinates.
+        water: The station's water history, defining the fetched time span.
+        skip_if_exists: Reuse an existing file instead of fetching.
+
+    Returns:
+        The station's hourly INCA weather history.
+
+    Raises:
+        RuntimeError: If a fetch is needed but the catalog or water history is
+            unavailable or empty.
+    """
+    if skip_if_exists and path.exists():
+        weather = pd.read_parquet(path)
+        print(f"Skipping existing weather history: {path}")
+        return weather
+    if catalog is None:
+        raise RuntimeError("Austrian station metadata is unavailable")
+    if water is None:
+        raise RuntimeError("PegelAlarm water history is unavailable")
+    if water.empty:
+        raise RuntimeError("PegelAlarm water history is empty")
+
+    latitude, longitude = resolve_station_coordinates(catalog, station_id)
+    water_times = pd.to_datetime(water["sourceDate"], utc=True)
+    weather = fetch_inca(
+        station_id,
+        latitude,
+        longitude,
+        water_times.min().to_pydatetime(),
+        water_times.max().to_pydatetime(),
+    )
+    weather.to_parquet(path, index=False)
+    print(f"Saved {len(weather):,} weather observations to {path}")
+    return weather

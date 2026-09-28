@@ -553,3 +553,16 @@ def test_score_saved_model_scores_only_the_sequence_eligible_cohort(
         sequence_length,
         len(channel_columns),
     )
+
+
+def test_sampled_parameter_key_orders_cell_sequence_hidden_layers() -> None:
+    key = rnn.sampled_parameter_key(
+        {
+            "cell_type": "gru",
+            "sequence_length": 24,
+            "hidden_size": np.int64(32),
+            "num_layers": np.int64(2),
+        }
+    )
+
+    assert key == ("gru", 24, 32, 2)

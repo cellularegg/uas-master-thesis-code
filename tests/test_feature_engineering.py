@@ -14,6 +14,7 @@ from src.feature_engineering import (
     DEFAULT_FEATURE_CONFIG,
     FeatureConfig,
     build_feature_frame,
+    build_joined_feature_frame,
     calculate_target_eligibility,
     extract_station_frame,
     feature_column_names,
@@ -592,3 +593,37 @@ def test_stage3_uses_shared_target_level_and_calendar_features() -> None:
         )
     for name, calendar_values in calendar.items():
         np.testing.assert_array_equal(result[name], calendar_values)
+
+
+def test_build_joined_feature_frame_engineers_only_the_target_station() -> None:
+    target = _station_frame(200, station_id="target-at")
+    upstream = _station_frame(3, station_id="upstream-at", start="2024-01-01T01:00")
+    joined = join_station_frames(
+        {"target-at": target, "upstream-at": upstream}, target_station_id="target-at"
+    )
+    derived_columns = ["water_level_lag_1h", "target_valid"]
+
+    result, summaries = build_joined_feature_frame(
+        joined, "train", station_id="target-at", derived_columns=derived_columns
+    )
+
+    expected = build_feature_frame(
+        target, station_id="target-at", config=DEFAULT_FEATURE_CONFIG
+    )
+    assert result.columns.tolist() == [
+        *joined.columns,
+        "target-at__water_level_lag_1h",
+        "target-at__target_valid",
+    ]
+    assert result["target-at__water_level_lag_1h"].tolist() == pytest.approx(
+        expected["water_level_lag_1h"].tolist(), nan_ok=True
+    )
+    assert result["target-at__target_valid"].dtype == "boolean"
+    assert summaries == [
+        {
+            "partition": "train",
+            "station_id": "target-at",
+            "usable_rows": 200,
+            "target_valid_rows": int(expected["target_valid"].sum()),
+        }
+    ]

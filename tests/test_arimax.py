@@ -1,6 +1,7 @@
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -516,3 +517,76 @@ def test_recursion_rebuilds_target_features_like_stage3() -> None:
             np.testing.assert_allclose(actual[row, step], expected, rtol=1e-10)
     # Recursion makes later steps depend on the lag features, not the issue row.
     assert not np.allclose(actual[:, 1:], actual[:, :1])
+
+
+def test_sealed_test_histories_joins_and_marks_inserted_hours() -> None:
+    def hourly(start: str, periods: int) -> pd.DatetimeIndex:
+        return pd.date_range(start, periods=periods, freq="h", tz="UTC")
+
+    dataset = SimpleNamespace(
+        predictor_train_history=pd.DataFrame(
+            {"x": [1.0, 2.0]}, hourly("2024-01-01", 2)
+        ),
+        predictor_test_history=pd.DataFrame(
+            {"x": [4.0]}, hourly("2024-01-01T03:00", 1)
+        ),
+        target_train_history=pd.DataFrame(
+            {"water_level": [1.0, 2.0], "imputed": [False, True]},
+            hourly("2024-01-01", 2),
+        ),
+        target_test_history=pd.DataFrame(
+            {"water_level": [4.0], "imputed": [False]}, hourly("2024-01-01T03:00", 1)
+        ),
+    )
+
+    predictors, target = arimax.sealed_test_histories(dataset)  # type: ignore[arg-type]
+
+    assert predictors.index.equals(hourly("2024-01-01", 4))
+    assert predictors["x"].isna().tolist() == [False, False, True, False]
+    assert target["imputed"].tolist() == [False, True, False, False]
+    assert target["imputed"].dtype == bool
+
+
+def test_sealed_test_histories_rejects_overlapping_histories() -> None:
+    index = pd.date_range("2024-01-01", periods=2, freq="h", tz="UTC")
+    dataset = SimpleNamespace(
+        predictor_train_history=pd.DataFrame({"x": [1.0, 2.0]}, index),
+        predictor_test_history=pd.DataFrame({"x": [3.0]}, index[1:]),
+    )
+
+    with pytest.raises(ValueError, match="strictly separated"):
+        arimax.sealed_test_histories(dataset)  # type: ignore[arg-type]
+
+
+def _run_params_dataset() -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        input_hashes={"train_sha256": "a", "test_sha256": "b"},
+        folds=[(np.arange(2), np.arange(2, 3))] * 3,
+        train_rows=pd.DataFrame(index=range(10)),
+        test_rows=pd.DataFrame(index=range(4)),
+        raw_row_counts={"train": 12, "test": 5},
+    )
+
+
+def test_run_params_describes_search_data_and_policies() -> None:
+    params = arimax.run_params(
+        _run_params_dataset(),
+        station_id="s-at",
+        forecast_horizon_hours=24,
+        candidate_count=78,
+        n_workers=10,
+        maxiter=200,
+        max_outer_iter=50,
+        gls_tol=1e-6,
+        selection_metric="rmse",
+        initial_train_fraction=0.5,
+        embargo_rows=24,
+    )
+
+    assert params["candidate_count"] == 78
+    assert params["gls_tol"] == 1e-6
+    assert params["n_validation_folds"] == 3
+    assert params["seasonal_order"] == "(0, 0, 0, 0)"
+    assert params["nonconvergence_policy"] == "finite fits remain eligible"

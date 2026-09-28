@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
@@ -23,7 +23,7 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX  # type: ignore[import-un
 from threadpoolctl import threadpool_limits  # type: ignore[import-untyped]
 
 from src.arima import observed_hourly_history
-from src.dataset import JoinedFeatureContract
+from src.dataset import JoinedDataset, JoinedFeatureContract
 from src.feature_engineering import (
     target_feature_lookback_hours,
     target_level_features,
@@ -356,6 +356,38 @@ def fit_arimax(
     return FittedArimax(
         contract, candidate, result, beta, x_scaler, y_scaler, index[-1]
     ), detail
+
+
+def sealed_test_histories(
+    dataset: JoinedDataset,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Join the train and test histories for sealed-test rolling forecasts.
+
+    Args:
+        dataset: Joined dataset with separate train and test histories.
+
+    Returns:
+        The hourly predictor history and the hourly target history spanning
+        train and test; target hours inserted by the hourly reindex are marked
+        as not imputed so they remain explicit missing observations.
+
+    Raises:
+        ValueError: If the train history does not end before the test history.
+    """
+    if (
+        dataset.predictor_train_history.index[-1]
+        >= dataset.predictor_test_history.index[0]
+    ):
+        raise ValueError("ARIMAX requires strictly separated train/test histories")
+    predictor_history = pd.concat(
+        [dataset.predictor_train_history, dataset.predictor_test_history]
+    ).asfreq("h")
+    target_history = pd.concat(
+        [dataset.target_train_history, dataset.target_test_history]
+    ).asfreq("h")
+    # Newly inserted target-history hours must remain explicit missing observations.
+    target_history["imputed"] = target_history["imputed"].fillna(False).astype(bool)
+    return predictor_history, target_history
 
 
 def rolling_forecasts(
@@ -1032,3 +1064,121 @@ def load_arimax_model(
         if manifest.get(key) != value:
             raise ValueError(f"ARIMAX artifact {key} does not match its manifest")
     return model
+
+
+def run_params(
+    dataset: JoinedDataset,
+    *,
+    station_id: str,
+    forecast_horizon_hours: int,
+    candidate_count: int,
+    n_workers: int,
+    maxiter: int,
+    max_outer_iter: int,
+    gls_tol: float,
+    selection_metric: str,
+    initial_train_fraction: float,
+    embargo_rows: int,
+) -> dict[str, object]:
+    """Describe the ARIMAX search configuration and data for every MLflow run.
+
+    Args:
+        dataset: Joined dataset the search runs on.
+        station_id: Target station identifier.
+        forecast_horizon_hours: Configured direct-forecast horizon.
+        candidate_count: Number of searched subset/order candidates.
+        n_workers: Worker processes used for candidate evaluation.
+        maxiter: Maximum optimizer iterations per ARMA fit.
+        max_outer_iter: Maximum feasible-GLS outer iterations.
+        gls_tol: Feasible-GLS convergence tolerance.
+        selection_metric: CV metric used to select the candidate.
+        initial_train_fraction: Fraction of rows in the first fold's training window.
+        embargo_rows: Rows left between training and validation windows.
+
+    Returns:
+        Input hashes, search settings, row counts, and the model's formulation,
+        estimation, and data policies.
+    """
+    return {
+        **dataset.input_hashes,
+        "station_id": station_id,
+        "forecast_horizon_hours": forecast_horizon_hours,
+        "candidate_count": candidate_count,
+        "n_workers": n_workers,
+        "maxiter": maxiter,
+        "max_outer_iter": max_outer_iter,
+        "gls_tol": gls_tol,
+        "selection_metric": selection_metric,
+        "n_validation_folds": len(dataset.folds),
+        "initial_train_fraction": initial_train_fraction,
+        "embargo_rows": embargo_rows,
+        "eligible_train_rows": len(dataset.train_rows),
+        "eligible_test_rows": len(dataset.test_rows),
+        "raw_train_rows": dataset.raw_row_counts["train"],
+        "raw_test_rows": dataset.raw_row_counts["test"],
+        "formulation": "recursive one-step regression with ARIMA errors",
+        "estimation": "iterated feasible GLS with conditional ARMA maximum likelihood",
+        "intercept": "d == 0",
+        "seasonal_order": "(0, 0, 0, 0)",
+        "update_policy": "causal observed one-step label updates",
+        "future_predictor_policy": "target-station level predictors recomputed from forecasts; UTC calendar recomputed; other predictors held at issue time",
+        "training_data_policy": "common eligible cohort; one-step labels through last training issue time + 1 h; imputed as missing",
+        "preprocessing": "training-only predictor and one-step target standardization; retain all columns",
+        "nonconvergence_policy": "finite fits remain eligible",
+    }
+
+
+def log_cv_search(
+    evaluations: Iterable[CandidateEvaluation],
+    *,
+    candidates: Sequence[ArimaxCandidate],
+    client: Any,
+    experiment_id: str,
+    execution_uuid: str,
+    common_params: dict[str, object],
+) -> list[CandidateEvaluation]:
+    """Log each evaluated candidate as a back-dated MLflow parent run.
+
+    Parallel results arrive in completion order; run names keep each
+    candidate's grid position.
+
+    Args:
+        evaluations: Candidate evaluations in the order they complete.
+        candidates: The searched grid, defining run numbers and result order.
+        client: MLflow client used to create and terminate the runs.
+        experiment_id: Experiment receiving the runs.
+        execution_uuid: The notebook execution's ``execution_uuid`` tag.
+        common_params: Params logged on every candidate run.
+
+    Returns:
+        The logged evaluations, sorted into grid order.
+    """
+    import mlflow
+    from tqdm.auto import tqdm  # type: ignore[import-untyped]
+
+    from src.tracking import backdated_run, run_tags
+
+    logged: list[CandidateEvaluation] = []
+    for evaluation in tqdm(
+        evaluations,
+        total=len(candidates),
+        desc="ARIMAX CV search",
+        unit="candidate",
+    ):
+        number = candidates.index(evaluation.candidate) + 1
+        with backdated_run(
+            client,
+            experiment_id=experiment_id,
+            run_name=f"arimax_candidate_{number:03d}",
+            tags=run_tags("cv", "candidate_parent", execution_uuid),
+            start_time_ms=evaluation.started_at_ms,
+            end_time_ms=evaluation.ended_at_ms,
+        ):
+            mlflow.log_params(common_params)
+            log_candidate(evaluation)
+        logged.append(evaluation)
+        tqdm.write(
+            f"Candidate {number}/{len(candidates)} ({len(logged)} done): {evaluation.candidate.subset}, {evaluation.candidate.order}, {'ok' if evaluation.summary else 'failed'}"
+        )
+    logged.sort(key=lambda result: candidates.index(result.candidate))
+    return logged

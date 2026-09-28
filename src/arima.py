@@ -20,7 +20,7 @@ from joblib import (  # type: ignore[import-untyped]
 )
 from statsmodels.tsa.statespace.sarimax import SARIMAX  # type: ignore[import-untyped]
 
-from src.dataset import JoinedFeatureContract
+from src.dataset import JoinedDataset, JoinedFeatureContract
 from src.metrics import metric_tables
 from src.model_selection import select_candidate as rank_candidate
 from src.training import summarize_cv_metrics, validate_predictions
@@ -787,3 +787,110 @@ def log_candidate(evaluation: CandidateEvaluation) -> None:
                 )
         client.set_terminated(child.info.run_id, end_time=ended_at_ms)
     mlflow.log_metrics(evaluation.summary)
+
+
+def run_params(
+    dataset: JoinedDataset,
+    *,
+    station_id: str,
+    forecast_horizon_hours: int,
+    candidate_count: int,
+    n_workers: int,
+    selection_metric: str,
+    maxiter: int,
+    initial_train_fraction: float,
+    embargo_rows: int,
+) -> dict[str, object]:
+    """Describe the ARIMA search configuration and data for every MLflow run.
+
+    Args:
+        dataset: Joined dataset the search runs on.
+        station_id: Target station identifier.
+        forecast_horizon_hours: Configured direct-forecast horizon.
+        candidate_count: Number of searched ``(p, d, q)`` candidates.
+        n_workers: Worker processes used for candidate evaluation.
+        selection_metric: CV metric used to select the candidate.
+        maxiter: Maximum optimizer iterations per fit.
+        initial_train_fraction: Fraction of rows in the first fold's training window.
+        embargo_rows: Rows left between training and validation windows.
+
+    Returns:
+        Input hashes, search settings, row counts, and data/update policies.
+    """
+    return {
+        **dataset.input_hashes,
+        "station_id": station_id,
+        "forecast_horizon_hours": forecast_horizon_hours,
+        "candidate_count": candidate_count,
+        "n_workers": n_workers,
+        "selection_metric": selection_metric,
+        "maxiter": maxiter,
+        "training_data_policy": "full observed history through last training issue time + horizon; imputed as missing",
+        "feature_count": 1,
+        "feature_columns": json.dumps([f"{station_id}__water_level"]),
+        "n_validation_folds": len(dataset.folds),
+        "initial_train_fraction": initial_train_fraction,
+        "embargo_rows": embargo_rows,
+        "eligible_train_rows": len(dataset.train_rows),
+        "eligible_test_rows": len(dataset.test_rows),
+        "raw_train_rows": dataset.raw_row_counts["train"],
+        "raw_test_rows": dataset.raw_row_counts["test"],
+        "update_policy": "causal observed-level updates",
+    }
+
+
+def log_cv_search(
+    evaluations: Iterable[CandidateEvaluation],
+    *,
+    candidate_count: int,
+    client: Any,
+    experiment_id: str,
+    execution_uuid: str,
+    common_params: dict[str, object],
+) -> list[CandidateEvaluation]:
+    """Log each evaluated candidate as a back-dated MLflow parent run.
+
+    Runs are logged after worker-side evaluation, so their times are back-dated
+    to the recorded evaluation times.
+
+    Args:
+        evaluations: Candidate evaluations in the order they complete.
+        candidate_count: Total number of candidates, for progress reporting.
+        client: MLflow client used to create and terminate the runs.
+        experiment_id: Experiment receiving the runs.
+        execution_uuid: The notebook execution's ``execution_uuid`` tag.
+        common_params: Params logged on every candidate run.
+
+    Returns:
+        The logged evaluations, in logging order.
+    """
+    import mlflow
+    from tqdm.auto import tqdm  # type: ignore[import-untyped]
+
+    from src.tracking import backdated_run, run_tags
+
+    logged = []
+    for candidate_number, evaluation in enumerate(
+        tqdm(
+            evaluations,
+            total=candidate_count,
+            desc="ARIMA CV search",
+            unit="candidate",
+        ),
+        start=1,
+    ):
+        with backdated_run(
+            client,
+            experiment_id=experiment_id,
+            run_name=f"arima_candidate_{candidate_number:03d}",
+            tags=run_tags("cv", "candidate_parent", execution_uuid),
+            start_time_ms=evaluation.started_at_ms,
+            end_time_ms=evaluation.ended_at_ms,
+        ):
+            mlflow.log_params(common_params)
+            log_candidate(evaluation)
+        logged.append(evaluation)
+        tqdm.write(
+            f"Candidate {candidate_number}/{candidate_count}: {evaluation.candidate}"
+        )
+    return logged

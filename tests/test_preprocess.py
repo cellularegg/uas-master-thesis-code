@@ -14,6 +14,7 @@ from src.preprocess import (
     filter_station_frames_by_target_range_overlap,
     join_station_frames,
     merge_weather,
+    order_stations_by_target_distance,
     preprocess_station,
     split_station_frames_at_target_boundary,
     split_train_test,
@@ -686,3 +687,19 @@ def test_joined_writer_rejects_partitions_that_straddle_the_boundary(
             output_dir=tmp_path,
             split_boundary_utc=split_boundary,
         )
+
+
+def test_order_stations_by_target_distance_puts_target_then_nearest() -> None:
+    catalog = pd.DataFrame(
+        {
+            "commonid": ["target", "far", "near", "unused"],
+            "positionKm": [100.0, 130.0, 95.0, 101.0],
+        }
+    )
+
+    order, distances = order_stations_by_target_distance(
+        catalog, target_station_id="target", station_ids=["far", "target", "near"]
+    )
+
+    assert order == ["target", "near", "far"]
+    assert distances == {"target": 0.0, "near": 5.0, "far": 30.0}

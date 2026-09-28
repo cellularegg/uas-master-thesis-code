@@ -6,6 +6,7 @@ import pytest
 
 from src.model_selection import (
     deduplicate_sampled_parameters,
+    search_space_summary,
     select_candidate,
     tie_breaking_policy,
 )
@@ -215,3 +216,16 @@ def test_tie_breaking_policy_composes_metric_and_descriptions() -> None:
         "fewer features",
         "smaller alpha",
     ]
+
+
+def test_search_space_summary_distinguishes_grids_from_distributions() -> None:
+    from scipy.stats import randint  # type: ignore[import-untyped]
+
+    assert search_space_summary({"depth": [3, 5], "alpha": [0.1, 0.2, 0.3]}) == (
+        "random_without_replacement",
+        6,
+    )
+    assert search_space_summary({"depth": randint(1, 4), "alpha": [0.1]}) == (
+        "random_with_replacement",
+        "distribution_defined",
+    )

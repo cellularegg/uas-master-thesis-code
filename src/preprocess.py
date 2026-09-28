@@ -383,6 +383,49 @@ def split_station_frames_at_target_boundary(
     return train_by_station, test_by_station, boundary
 
 
+def order_stations_by_target_distance(
+    station_catalog: pd.DataFrame,
+    *,
+    target_station_id: str,
+    station_ids: Sequence[str],
+) -> tuple[list[str], dict[str, float]]:
+    """Order stations as target first, then by river-km distance to the target.
+
+    Args:
+        station_catalog: PegelAlarm catalog with ``commonid`` and ``positionKm``.
+        target_station_id: Station whose river position is the reference.
+        station_ids: Stations to order; the target may be among them.
+
+    Returns:
+        The join order (target, then nearest station first) and each ordered
+        station's absolute river-km distance to the target.
+
+    Raises:
+        KeyError: If a station is missing from the catalog.
+    """
+    station_positions = station_catalog.set_index("commonid")["positionKm"]
+    target_position_km = float(station_positions.loc[target_station_id])
+
+    def distance_to_target(station_id: str) -> float:
+        """Absolute river-km distance between a station and the target station."""
+        return abs(float(station_positions.loc[station_id]) - target_position_km)
+
+    station_order = [
+        target_station_id,
+        *sorted(
+            (
+                station_id
+                for station_id in station_ids
+                if station_id != target_station_id
+            ),
+            key=distance_to_target,
+        ),
+    ]
+    return station_order, {
+        station_id: distance_to_target(station_id) for station_id in station_order
+    }
+
+
 def join_station_frames(
     station_frames: Mapping[str, pd.DataFrame], *, target_station_id: str
 ) -> pd.DataFrame:

@@ -412,6 +412,99 @@ def extract_station_frame(joined: pd.DataFrame, station_id: str) -> pd.DataFrame
     return station
 
 
+def attach_station_features(
+    joined: pd.DataFrame,
+    station_id: str,
+    available: pd.Series,
+    station_features: pd.DataFrame,
+    *,
+    derived_columns: Sequence[str],
+) -> pd.DataFrame:
+    """Add one station's derived columns while preserving the joined frame.
+
+    Args:
+        joined: Joined all-station frame.
+        station_id: Station whose derived columns are added.
+        available: Mask of joined rows where the station has an observation.
+        station_features: The station's feature frame, one row per available
+            joined row; empty to add all-missing columns.
+        derived_columns: Derived feature, ``target_valid``, and target columns.
+
+    Returns:
+        A copy of ``joined`` with ``{station_id}__{column}`` for every derived
+        column; ``target_valid`` is nullable boolean, the rest float.
+    """
+    result = joined.copy()
+    values_index = joined.index[available]
+    prefix = f"{station_id}__"
+    for column in derived_columns:
+        if column == "target_valid":
+            values = pd.Series(pd.NA, index=joined.index, dtype="boolean")
+        else:
+            values = pd.Series(float("nan"), index=joined.index, dtype="float64")
+        if not station_features.empty:
+            values.loc[values_index] = station_features[column].to_numpy()
+        result[f"{prefix}{column}"] = values
+    return result
+
+
+def build_joined_feature_frame(
+    joined: pd.DataFrame,
+    partition: str,
+    *,
+    station_id: str,
+    derived_columns: Sequence[str],
+    config: FeatureConfig = DEFAULT_FEATURE_CONFIG,
+) -> tuple[pd.DataFrame, list[dict[str, object]]]:
+    """Engineer only the target station in one joined partition.
+
+    Args:
+        joined: Joined all-station frame of one partition.
+        partition: Partition name recorded in the summary, e.g. ``"train"``.
+        station_id: Target station to engineer.
+        derived_columns: Derived feature, ``target_valid``, and target columns.
+        config: Feature configuration.
+
+    Returns:
+        The joined frame with the target station's derived columns, and one
+        summary row with its usable and target-valid row counts.
+    """
+    result = joined.copy()
+    partition_summaries: list[dict[str, object]] = []
+    station = extract_station_frame(joined, station_id)
+    available = joined[f"{station_id}__station_id"].notna()
+    if station.empty:
+        result = attach_station_features(
+            result,
+            station_id,
+            available,
+            station_features=station,
+            derived_columns=derived_columns,
+        )
+        target_valid_rows = 0
+    else:
+        station_features = build_feature_frame(
+            station, station_id=station_id, config=config
+        )
+        result = attach_station_features(
+            result,
+            station_id,
+            available,
+            station_features,
+            derived_columns=derived_columns,
+        )
+        target_valid_rows = int(station_features["target_valid"].sum())
+    partition_summaries.append(
+        {
+            "partition": partition,
+            "station_id": station_id,
+            "usable_rows": int(available.sum()),
+            "target_valid_rows": target_valid_rows,
+        }
+    )
+    return result, partition_summaries
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as file:
