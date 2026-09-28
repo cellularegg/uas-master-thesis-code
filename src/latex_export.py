@@ -302,9 +302,11 @@ def save_unicode_definitions() -> Path:
 def save_notebook_code(notebook_path: Path) -> Path:
     r"""Write a notebook filename and its code cells as a LaTeX section in ``code/``.
 
-    Only code cells are exported, one block per non-empty cell; markdown cells
-    and outputs are dropped. The notebook filename, including its extension,
-    becomes the section title. The thesis preamble must load ``minted``
+    Only code cells before the notebook's second level-one markdown heading
+    (``# ...``) are exported, so a trailing evaluation part is left out; without
+    a second such heading every code cell is exported. Each non-empty code cell
+    becomes one block; markdown cells and outputs are dropped. The notebook
+    filename, including its extension, becomes the section title. The thesis preamble must load ``minted``
     (compile with ``-shell-escape``) and ``\input`` the fragment written by
     :func:`save_unicode_definitions`. Prints the ``\input`` line to paste into a
     chapter or appendix.
@@ -341,12 +343,20 @@ def save_notebook_code(notebook_path: Path) -> Path:
         for character in section_title
     )
     blocks = []
+    level_one_headings = 0
     for cell in notebook["cells"]:
+        source = cell["source"]
+        text = "".join(source) if isinstance(source, list) else source
+        if cell["cell_type"] == "markdown":
+            level_one_headings += sum(
+                line.startswith("# ") for line in text.splitlines()
+            )
+            if level_one_headings >= 2:
+                break
+            continue
         if cell["cell_type"] != "code":
             continue
-        source = cell["source"]
-        code = "".join(source) if isinstance(source, list) else source
-        code = code.strip("\n")
+        code = text.strip("\n")
         if not code.strip():
             continue
         undefined = {
