@@ -231,8 +231,9 @@ def _fit_one_step(
 ) -> tuple[np.ndarray, Any, dict[str, Any]]:
     """Alternate exact GLS coefficients and ARMA MLE until the likelihood settles.
 
-    Each step maximizes the joint likelihood over one parameter block, so the
-    alternation converges to the joint maximum-likelihood estimate.
+    Each step optimizes one parameter block conditional on the other. This is
+    an iterative fit with a finite stopping budget; it does not guarantee a
+    global joint maximum or convergence when the budget is exhausted.
     """
     model = _error_model(target, order)
     params = np.zeros(model.k_params)
@@ -286,9 +287,10 @@ def fit_arimax(
 
     The one-step target is a regression with ARIMA errors estimated by iterated
     feasible GLS: exact Kalman-whitened GLS coefficients given the ARMA
-    parameters alternate with ARMA maximum likelihood given the coefficients,
-    converging to the joint maximum-likelihood estimate. Missing issue hours
-    are missing observations on the hourly grid. No columns are dropped.
+    parameters alternate with ARMA maximum likelihood given the coefficients.
+    The finite iteration budget does not guarantee convergence or a global
+    optimum. Missing issue hours are missing observations on the hourly grid.
+    No columns are dropped.
 
     Args:
         rows: Common eligible training cohort, including timestamps and targets.
