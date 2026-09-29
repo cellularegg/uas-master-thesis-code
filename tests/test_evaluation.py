@@ -10,6 +10,7 @@ from mlflow.tracking import MlflowClient
 from src.evaluation import (
     COMPARISON_METRICS_COLUMNS,
     FEATURE_SUBSET_CV_COLUMNS,
+    FEATURE_SUBSET_MODEL_EXPERIMENTS,
     load_latest_complete_comparison_metrics,
     load_latest_complete_feature_subset_cv_metrics,
     load_saved_model_review,
@@ -496,6 +497,60 @@ def test_load_feature_subset_metrics_marks_model_specific_winner_per_subset() ->
     }
     assert str(result["completed_at_utc"].dtype) == "datetime64[ms, UTC]"
     assert str(result["is_best_within_subset"].dtype) == "boolean"
+
+
+def test_rnn_subset_ranking_reads_channel_count_and_applies_rnn_tie_break() -> None:
+    parameters = {
+        "subset": "full",
+        "cell_type": "gru",
+        "sequence_length": "24",
+        "hidden_size": "64",
+        "num_layers": "1",
+        "channel_count": "20",
+        "selection_metric": "rmse",
+    }
+    runs = _execution_runs("rnn", "rnn-execution", candidate_params=parameters)
+    tied_larger = _run(
+        "tied-larger",
+        run_type="candidate_parent",
+        execution_uuid="rnn-execution",
+        end_time=1_850,
+        params={**runs[0].data.params, "hidden_size": "128"},
+        metrics=_cv_metrics(2),
+    )
+    other_subset = _run(
+        "target-only",
+        run_type="candidate_parent",
+        execution_uuid="rnn-execution",
+        end_time=1_800,
+        params={
+            **runs[0].data.params,
+            "subset": "target_station_full",
+            "channel_count": "10",
+        },
+        metrics=_cv_metrics(2),
+    )
+
+    result = load_latest_complete_feature_subset_cv_metrics(
+        client=cast(
+            MlflowClient,
+            FakeMlflowClient({"rnn": [*runs, tied_larger, other_subset]}),
+        ),
+        model_experiments={"RNN": "rnn"},
+        forecast_horizon_hours=2,
+    )
+
+    assert "RNN" in FEATURE_SUBSET_MODEL_EXPERIMENTS
+    assert len(result) == 3
+    assert result.set_index("run_id")["feature_count"].to_dict() == {
+        "rnn-execution-candidate": 20,
+        "tied-larger": 20,
+        "target-only": 10,
+    }
+    assert set(result.loc[result["is_best_within_subset"], "run_id"]) == {
+        "rnn-execution-candidate",
+        "target-only",
+    }
 
 
 def test_arimax_complete_execution_and_subset_ranking_skip_failed_candidates() -> None:

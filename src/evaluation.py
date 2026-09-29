@@ -94,8 +94,11 @@ _CANDIDATE_PARAMETERS: dict[str, tuple[str, ...]] = {
         "min_samples_leaf",
         "max_features",
     ),
-    "rnn": ("cell_type", "sequence_length", "hidden_size", "num_layers"),
+    "rnn": ("subset", "cell_type", "sequence_length", "hidden_size", "num_layers"),
 }
+# MLflow parameter holding a candidate's input width; the RNN calls its
+# per-timestep inputs channels, every other subset-aware model features.
+_FEATURE_COUNT_PARAMETERS: dict[str, str] = {"rnn": "channel_count"}
 FEATURE_SUBSET_MODEL_EXPERIMENTS: dict[str, str] = {
     model: experiment_name
     for model, experiment_name in MODEL_EXPERIMENTS.items()
@@ -975,7 +978,10 @@ def _feature_subset_candidate_rows(
                 f"Candidate selection_metric is invalid: {selection_metric!r}"
             )
         selection_metrics.add(selection_metric)
-        feature_count = _positive_integer_parameter(run, "feature_count")
+        feature_count_parameter = _FEATURE_COUNT_PARAMETERS.get(
+            execution.experiment_name, "feature_count"
+        )
+        feature_count = _positive_integer_parameter(run, feature_count_parameter)
         _required_finite_metrics(
             run,
             [
@@ -988,7 +994,7 @@ def _feature_subset_candidate_rows(
 
         ranking_row: dict[str, object] = {
             "run_id": run.info.run_id,
-            "feature_count": feature_count,
+            feature_count_parameter: feature_count,
             **parsed_parameters,
         }
         output_row: dict[str, object] = {
@@ -1069,7 +1075,16 @@ def _parse_candidate_parameter(name: str, value: str) -> object:
         return value == "True"
     if name == "max_depth":
         return None if value == "None" else int(value)
-    if name in {"n_estimators", "min_samples_leaf", "p", "d", "q"}:
+    if name in {
+        "n_estimators",
+        "min_samples_leaf",
+        "p",
+        "d",
+        "q",
+        "sequence_length",
+        "hidden_size",
+        "num_layers",
+    }:
         return int(value)
     if name in {
         "alpha",
@@ -1131,6 +1146,14 @@ def _feature_subset_candidate_key(
                 max_features=candidate["max_features"],
             )
         )
+    if experiment_name == "rnn":
+        return (
+            str(candidate["subset"]),
+            str(candidate["cell_type"]),
+            int(str(candidate["sequence_length"])),
+            int(str(candidate["hidden_size"])),
+            int(str(candidate["num_layers"])),
+        )
     raise ValueError(f"Experiment {experiment_name!r} does not search feature subsets")
 
 
@@ -1160,6 +1183,10 @@ def _select_feature_subset_candidate_key(
         from src.extra_trees import select_candidate as select_extra_trees_candidate
 
         return tuple(select_extra_trees_candidate(candidates, selection_metric))
+    if experiment_name == "rnn":
+        from src.rnn import select_candidate as select_rnn_candidate
+
+        return tuple(select_rnn_candidate(candidates, selection_metric))
     raise ValueError(f"Experiment {experiment_name!r} does not search feature subsets")
 
 

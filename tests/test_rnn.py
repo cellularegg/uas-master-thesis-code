@@ -19,6 +19,7 @@ from src.rnn import (
     save_rnn_manifest,
     score_saved_model,
     select_candidate,
+    subset_channel_indices,
 )
 
 
@@ -121,6 +122,7 @@ def _save(
     manifest_path: Path,
     *,
     channel_columns: list[str] | None = None,
+    selected_subset: str = "raw_all_stations",
     selected_cell_type: str = "gru",
 ) -> None:
     save_rnn_manifest(
@@ -129,10 +131,11 @@ def _save(
         execution_uuid="execution-1",
         contract=dataset.contract,
         channel_columns=(
-            dataset.feature_subsets["raw_all_stations"]
+            dataset.feature_subsets[selected_subset]
             if channel_columns is None
             else channel_columns
         ),
+        selected_subset=selected_subset,
         selected_cell_type=selected_cell_type,
         selected_sequence_length=4,
         selected_hidden_size=8,
@@ -146,6 +149,8 @@ def test_select_candidate_ranks_by_metric_before_ties() -> None:
         pd.DataFrame(
             [
                 {
+                    "subset": "full",
+                    "channel_count": 8,
                     "cell_type": "lstm",
                     "sequence_length": 72,
                     "hidden_size": 64,
@@ -154,6 +159,8 @@ def test_select_candidate_ranks_by_metric_before_ties() -> None:
                     "rmse_mean": 2.0,
                 },
                 {
+                    "subset": "full",
+                    "channel_count": 8,
                     "cell_type": "gru",
                     "sequence_length": 24,
                     "hidden_size": 32,
@@ -164,13 +171,21 @@ def test_select_candidate_ranks_by_metric_before_ties() -> None:
             ]
         )
     )
-    assert winner == ("gru", 24, 32, 1)
+    assert winner == ("full", "gru", 24, 32, 1)
 
 
 def _tied_candidate(
-    *, sequence_length: int, hidden_size: int, num_layers: int, cell_type: str
+    *,
+    sequence_length: int,
+    hidden_size: int,
+    num_layers: int,
+    cell_type: str,
+    channel_count: int = 8,
+    subset: str = "full",
 ) -> dict[str, object]:
     return {
+        "subset": subset,
+        "channel_count": channel_count,
         "cell_type": cell_type,
         "sequence_length": sequence_length,
         "hidden_size": hidden_size,
@@ -182,8 +197,32 @@ def _tied_candidate(
 
 def test_select_candidate_breaks_ties_through_every_axis_in_order() -> None:
     # Equal-metric rows, isolating one tie-break axis at a time: earlier axes
-    # (sequence_length, then hidden_size, then num_layers, then cell_type)
-    # must decide before a later axis gets a chance to.
+    # (channel_count, sequence_length, hidden_size, num_layers, cell_type,
+    # then subset) must decide before a later axis gets a chance to.
+    fewer_channels_winner = select_candidate(
+        pd.DataFrame(
+            [
+                _tied_candidate(
+                    sequence_length=24,
+                    hidden_size=32,
+                    num_layers=1,
+                    cell_type="gru",
+                    channel_count=8,
+                    subset="full",
+                ),
+                _tied_candidate(
+                    sequence_length=72,
+                    hidden_size=64,
+                    num_layers=2,
+                    cell_type="lstm",
+                    channel_count=2,
+                    subset="target_station_full",
+                ),
+            ]
+        )
+    )
+    assert fewer_channels_winner == ("target_station_full", "lstm", 72, 64, 2)
+
     shorter_sequence_length_winner = select_candidate(
         pd.DataFrame(
             [
@@ -196,7 +235,7 @@ def test_select_candidate_breaks_ties_through_every_axis_in_order() -> None:
             ]
         )
     )
-    assert shorter_sequence_length_winner == ("gru", 24, 32, 1)
+    assert shorter_sequence_length_winner == ("full", "gru", 24, 32, 1)
 
     smaller_hidden_size_winner = select_candidate(
         pd.DataFrame(
@@ -210,7 +249,7 @@ def test_select_candidate_breaks_ties_through_every_axis_in_order() -> None:
             ]
         )
     )
-    assert smaller_hidden_size_winner == ("gru", 24, 32, 1)
+    assert smaller_hidden_size_winner == ("full", "gru", 24, 32, 1)
 
     fewer_num_layers_winner = select_candidate(
         pd.DataFrame(
@@ -224,7 +263,7 @@ def test_select_candidate_breaks_ties_through_every_axis_in_order() -> None:
             ]
         )
     )
-    assert fewer_num_layers_winner == ("gru", 24, 32, 1)
+    assert fewer_num_layers_winner == ("full", "gru", 24, 32, 1)
 
     stable_cell_type_winner = select_candidate(
         pd.DataFrame(
@@ -238,7 +277,44 @@ def test_select_candidate_breaks_ties_through_every_axis_in_order() -> None:
             ]
         )
     )
-    assert stable_cell_type_winner == ("gru", 24, 32, 1)
+    assert stable_cell_type_winner == ("full", "gru", 24, 32, 1)
+
+    stable_feature_subset_winner = select_candidate(
+        pd.DataFrame(
+            [
+                _tied_candidate(
+                    sequence_length=24,
+                    hidden_size=32,
+                    num_layers=1,
+                    cell_type="gru",
+                    subset="raw_all_stations",
+                ),
+                _tied_candidate(
+                    sequence_length=24,
+                    hidden_size=32,
+                    num_layers=1,
+                    cell_type="gru",
+                    subset="full",
+                ),
+            ]
+        )
+    )
+    assert stable_feature_subset_winner == ("full", "gru", 24, 32, 1)
+
+
+def test_subset_channel_indices_locates_ordered_subset_channels() -> None:
+    cohort = ["a", "b", "c", "d"]
+
+    assert subset_channel_indices(cohort, ["b", "d"]) == [1, 3]
+    assert subset_channel_indices(cohort, cohort) == [0, 1, 2, 3]
+    for channels, message in (
+        (["d", "b"], "preserve the cohort channel order"),
+        (["b", "z"], "not cohort channels"),
+        (["b", "b"], "non-empty and unique"),
+        ([], "non-empty and unique"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            subset_channel_indices(cohort, channels)
 
 
 def test_load_raw_channel_frame_validates_contiguous_hourly_grid(
@@ -424,11 +500,12 @@ def test_rnn_manifest_round_trips_the_model_contract(
     manifest = load_rnn_manifest(
         manifest_path,
         contract=dataset.contract,
-        channel_columns=dataset.feature_subsets["raw_all_stations"],
+        feature_subsets=dataset.feature_subsets,
     )
 
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert stored["schema_version"] == "3.0"
+    assert stored["schema_version"] == "4.0"
+    assert stored["selected_subset"] == "raw_all_stations"
     assert not {
         "selection_metric",
         "tie_breaking",
@@ -444,6 +521,7 @@ def test_rnn_manifest_round_trips_the_model_contract(
         "training",
     }.intersection(stored)
     assert manifest.execution_uuid == "execution-1"
+    assert manifest.selected_subset == "raw_all_stations"
     assert manifest.selected_cell_type == "gru"
     assert manifest.selected_sequence_length == 4
     assert manifest.selected_hidden_size == 8
@@ -465,7 +543,7 @@ def test_load_rnn_manifest_reports_missing_manifest(tmp_path: Path) -> None:
         load_rnn_manifest(
             tmp_path / "absent.json",
             contract=dataset.contract,
-            channel_columns=dataset.feature_subsets["raw_all_stations"],
+            feature_subsets=dataset.feature_subsets,
         )
 
 
@@ -474,14 +552,14 @@ def test_load_rnn_manifest_rejects_an_older_schema_version(tmp_path: Path) -> No
     manifest_path = tmp_path / "rnn.json"
     _save(dataset, manifest_path)
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    stored["schema_version"] = "0.9"
+    stored["schema_version"] = "3.0"
     manifest_path.write_text(json.dumps(stored), encoding="utf-8")
 
     with pytest.raises(ValueError, match="schema version"):
         load_rnn_manifest(
             manifest_path,
             contract=dataset.contract,
-            channel_columns=dataset.feature_subsets["raw_all_stations"],
+            feature_subsets=dataset.feature_subsets,
         )
 
 
@@ -496,13 +574,19 @@ def test_load_rnn_manifest_rejects_contract_mismatches(tmp_path: Path) -> None:
         ("forecast_horizon_hours", FORECAST_HORIZON_HOURS + 1, "forecast horizon"),
         ("target_columns", ["only-one"], "target contract"),
         ("channel_columns", ["only-one"], "channel columns"),
+        ("selected_subset", "unknown-subset", "feature subset"),
+        (
+            "channel_columns",
+            dataset.feature_subsets["target_station_full"],
+            "'raw_all_stations' subset",
+        ),
     ):
         manifest_path.write_text(json.dumps({**stored, field: value}), encoding="utf-8")
         with pytest.raises(ValueError, match=message):
             load_rnn_manifest(
                 manifest_path,
                 contract=dataset.contract,
-                channel_columns=dataset.feature_subsets["raw_all_stations"],
+                feature_subsets=dataset.feature_subsets,
             )
 
 
@@ -521,14 +605,20 @@ def test_score_saved_model_scores_only_the_sequence_eligible_cohort(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dataset, _train_path, test_path = _write_feature_artifacts(tmp_path)
-    channel_columns = dataset.feature_subsets["raw_all_stations"]
+    cohort_channel_columns = dataset.feature_subsets["full"]
+    channel_columns = dataset.feature_subsets["target_station_full"]
     raw_test_channel_frame = load_raw_channel_frame(
-        test_path, channel_columns=channel_columns
+        test_path, channel_columns=cohort_channel_columns
     )
+    # A gap in a channel outside the selected subset still narrows the cohort,
+    # so scoring matches training's common cohort for every subset.
+    gap_timestamp = raw_test_channel_frame.index[20]
+    raw_test_channel_frame.loc[gap_timestamp, "station-b__water_level"] = np.nan
     sequence_length = 6
     manifest = RnnManifest(
         execution_uuid="execution-1",
         station_id=dataset.contract.station_id,
+        selected_subset="target_station_full",
         selected_cell_type="gru",
         selected_sequence_length=sequence_length,
         selected_hidden_size=8,
@@ -541,10 +631,17 @@ def test_score_saved_model_scores_only_the_sequence_eligible_cohort(
     monkeypatch.setattr(rnn, "load_joblib", lambda _path: fake_model)
 
     predictions, origins = score_saved_model(
-        manifest, tmp_path / "rnn.joblib", dataset.test_rows, raw_test_channel_frame
+        manifest,
+        tmp_path / "rnn.joblib",
+        dataset.test_rows,
+        raw_test_channel_frame,
+        cohort_channel_columns=cohort_channel_columns,
     )
 
-    assert len(origins) == len(dataset.test_rows) - (sequence_length - 1)
+    assert len(origins) == len(dataset.test_rows) - (sequence_length - 1) - (
+        sequence_length
+    )
+    assert gap_timestamp not in set(pd.to_datetime(origins["timestamp"], utc=True))
     assert len(origins) <= len(dataset.test_rows)
     assert predictions.shape == (len(origins), FORECAST_HORIZON_HOURS)
     assert fake_model.sequence_values is not None
@@ -553,6 +650,13 @@ def test_score_saved_model_scores_only_the_sequence_eligible_cohort(
         sequence_length,
         len(channel_columns),
     )
+    first_origin_position = raw_test_channel_frame.index.get_loc(
+        pd.Timestamp(origins["timestamp"].iloc[0])
+    )
+    expected_last_step = raw_test_channel_frame[channel_columns].to_numpy(dtype=float)[
+        first_origin_position
+    ]
+    np.testing.assert_allclose(fake_model.sequence_values[0, -1], expected_last_step)
 
 
 def test_sampled_parameter_key_orders_cell_sequence_hidden_layers() -> None:
