@@ -12,7 +12,6 @@ import torch
 from joblib import load as load_joblib  # type: ignore[import-untyped]
 from sklearn.preprocessing import StandardScaler  # type: ignore[import-untyped]
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
 
 from src.config import RANDOM_STATE
 from src.dataset import JoinedFeatureContract
@@ -337,33 +336,39 @@ class RnnForecaster:
         optimizer = torch.optim.Adam(module.parameters(), lr=self.learning_rate)
         loss_function = nn.MSELoss()
 
-        dataset = TensorDataset(
-            torch.tensor(scaled_channels, dtype=torch.float32),
-            torch.tensor(scaled_targets, dtype=torch.float32),
+        # The whole training set lives on the device and is sliced per batch;
+        # a per-sample DataLoader plus a per-step host sync dominate runtime
+        # for these small recurrent modules.
+        channel_tensor = torch.tensor(
+            scaled_channels, dtype=torch.float32, device=device
         )
-        loader_generator = torch.Generator().manual_seed(self.random_state)
-        loader = DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            generator=loader_generator,
-        )
+        target_tensor = torch.tensor(scaled_targets, dtype=torch.float32, device=device)
+        # Same CPU generator and draw as DataLoader(shuffle=True)'s
+        # RandomSampler, so every epoch sees the same batch composition.
+        shuffle_generator = torch.Generator().manual_seed(self.random_state)
 
         epoch_losses: list[float] = []
         for _ in range(self.max_epochs):
             module.train()
-            weighted_loss = 0.0
-            sample_count = 0
-            for batch_sequences, batch_targets in loader:
-                batch_sequences = batch_sequences.to(device)
-                batch_targets = batch_targets.to(device)
+            # Mirror DataLoader's per-epoch draws from its generator: a base
+            # seed when the iterator starts, the permutation, and a second
+            # permutation RandomSampler draws and truncates to zero length.
+            torch.empty((), dtype=torch.int64).random_(generator=shuffle_generator)
+            permutation = torch.randperm(n_samples, generator=shuffle_generator).to(
+                device
+            )
+            torch.randperm(n_samples, generator=shuffle_generator)
+            weighted_loss = torch.zeros((), device=device)
+            for start in range(0, n_samples, self.batch_size):
+                batch_indices = permutation[start : start + self.batch_size]
+                batch_sequences = channel_tensor[batch_indices]
+                batch_targets = target_tensor[batch_indices]
                 optimizer.zero_grad()
                 loss = loss_function(module(batch_sequences), batch_targets)
                 loss.backward()
                 optimizer.step()
-                weighted_loss += loss.item() * len(batch_sequences)
-                sample_count += len(batch_sequences)
-            epoch_losses.append(weighted_loss / sample_count)
+                weighted_loss += loss.detach() * len(batch_indices)
+            epoch_losses.append(float(weighted_loss) / n_samples)
 
         self.module_ = module.to("cpu")
         self.epoch_losses_ = epoch_losses
@@ -444,7 +449,7 @@ def build_rnn_estimator(
         learning_rate: Adam's step size.
         max_epochs: Fixed training-epoch budget.
         batch_size: Minibatch size.
-        random_state: Seed for weight initialization and the ``DataLoader``
+        random_state: Seed for weight initialization and the per-epoch
             shuffle order.
         device: Torch device to train on; ``None`` auto-detects MPS/CUDA/CPU.
 

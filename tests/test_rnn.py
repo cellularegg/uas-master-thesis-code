@@ -4,8 +4,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 from joblib import dump  # type: ignore[import-untyped]
 from joblib import load as load_joblib  # type: ignore[import-untyped]
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 
 from src import rnn
 from src.config import FORECAST_HORIZON_HOURS, TARGET_STATION_ID, WEATHER_VARIABLES
@@ -467,6 +470,66 @@ def test_rnn_forecaster_is_reproducible_with_a_fixed_random_state() -> None:
     ).fit(sequences, targets)
 
     np.testing.assert_allclose(first.predict(sequences), second.predict(sequences))
+
+
+def test_rnn_forecaster_matches_a_shuffled_dataloader_training_loop() -> None:
+    # 30 samples at batch 8 leaves a partial last batch every epoch.
+    sequences, targets = _synthetic_sequences(n=30)
+    forecaster = RnnForecaster(
+        cell_type="gru",
+        hidden_size=4,
+        num_layers=2,
+        max_epochs=3,
+        batch_size=8,
+        random_state=7,
+        device="cpu",
+    ).fit(sequences, targets)
+
+    torch.manual_seed(7)
+    assert forecaster.channel_scaler_ is not None
+    assert forecaster.target_scaler_ is not None
+    scaled_channels = forecaster.channel_scaler_.transform(
+        sequences.reshape(-1, sequences.shape[2])
+    ).reshape(sequences.shape)
+    scaled_targets = forecaster.target_scaler_.transform(targets)
+    reference = rnn._RecurrentForecaster(
+        cell_type="gru",
+        input_size=sequences.shape[2],
+        hidden_size=4,
+        num_layers=2,
+        dropout=0.1,
+        forecast_horizon=targets.shape[1],
+    )
+    optimizer = torch.optim.Adam(reference.parameters(), lr=0.001)
+    loader = DataLoader(
+        TensorDataset(
+            torch.tensor(scaled_channels, dtype=torch.float32),
+            torch.tensor(scaled_targets, dtype=torch.float32),
+        ),
+        batch_size=8,
+        shuffle=True,
+        generator=torch.Generator().manual_seed(7),
+    )
+    reference_losses = []
+    for _ in range(3):
+        reference.train()
+        weighted_loss = 0.0
+        for batch_sequences, batch_targets in loader:
+            optimizer.zero_grad()
+            loss = nn.MSELoss()(reference(batch_sequences), batch_targets)
+            loss.backward()
+            optimizer.step()
+            weighted_loss += loss.item() * len(batch_sequences)
+        reference_losses.append(weighted_loss / len(sequences))
+
+    assert forecaster.module_ is not None
+    for fitted, expected in zip(
+        forecaster.module_.parameters(), reference.parameters(), strict=True
+    ):
+        torch.testing.assert_close(fitted, expected, rtol=0, atol=0)
+    assert len(forecaster.epoch_losses_) == 3
+    assert np.isfinite(forecaster.epoch_losses_).all()
+    np.testing.assert_allclose(forecaster.epoch_losses_, reference_losses, rtol=1e-6)
 
 
 def test_rnn_forecaster_persists_a_cpu_module_via_joblib(tmp_path: Path) -> None:
