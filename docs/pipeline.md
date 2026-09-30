@@ -179,7 +179,7 @@ authoritative for a particular run.
 
 ## Stage 4: model training
 
-All six `04_*` notebooks call reusable logic in `src/`; notebooks retain the
+All eight `04_*` notebooks call reusable logic in `src/`; notebooks retain the
 run-specific constants, orchestration, displays, and plots. The shared entry
 point `src.dataset.load_joined_dataset` validates the feature metadata against
 the configured target/horizon, checks both Parquets contain the declared
@@ -220,15 +220,23 @@ The notebooks are:
 - `04_04_train_xgboost.ipynb`: samples a seeded hyperparameter set and reuses it
   for every subset. The native multi-output tree estimator receives raw numeric
   predictors without scaling.
+- `04_05_train_arima.ipynb`: univariate nonseasonal ARIMA (SARIMAX with no
+  exogenous inputs) on the target station's hourly water level. It searches a
+  fixed grid of `(p, d, q)` orders, fitted on the observed hourly history (imputed
+  hours masked as missing) and scored with rolling fixed-parameter forecasts.
 - `04_06_train_extra_trees.ipynb`: follows the same subset/sampled-search shape
   with a native multi-output `ExtraTreesRegressor`. It uses raw numeric
   predictors; randomized split thresholds provide the estimator's defining
   extra randomness.
-- `04_07_train_rnn.ipynb`: searches GRU/LSTM cell and sequence architecture over
-  the `raw_all_stations` channel contract. It constructs complete contiguous
-  hourly lookback sequences separately within train and test. Sequence length
-  can further narrow the common cohort and changes its folds. Channels and
-  targets are standardized inside the fitted `RnnForecaster`.
+- `04_07_train_rnn.ipynb`: searches feature subset and GRU/LSTM cell and
+  sequence architecture. It builds complete contiguous hourly lookback
+  sequences separately within train and test. Sequence length can further
+  narrow the common cohort and change its folds. Channels and targets are
+  standardized inside the fitted `RnnForecaster`.
+- `04_08_train_arimax.ipynb`: regression with ARIMA errors over the shared
+  feature subsets and a grid of `(p, d, q)` orders. A one-step model is fitted
+  by iterated GLS and forecast recursively, rebuilding target-station features
+  from its own predictions.
 
 For each fitted search, every candidate has an MLflow parent run and nested fold
 runs. Persistence uses its own parent with nested fold runs. The selected
@@ -245,4 +253,5 @@ hyperparameters, ordered feature/channel and target contracts, model path, and
 `execution_uuid`. CV, sealed-test, regime, cohort, and training diagnostics stay
 in MLflow rather than the manifest. Manifest loaders validate the model contract
 against the current feature metadata and subset definitions before a saved model
-can be rescored. Persistence has no fitted model or manifest.
+can be rescored. Persistence has no fitted model or manifest. ARIMA and ARIMAX save a
+training-state snapshot instead of a plain estimator.
