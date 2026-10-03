@@ -1837,17 +1837,8 @@ def forecast_window_figures(
             times have a complete, non-imputed context window.
     """
     prediction_columns = list(prediction_columns)
-    windows = prediction_table.copy()
-    windows["issue_time"] = pd.to_datetime(windows["issue_time"], utc=True)
-    windows["issue_rmse"] = np.sqrt(
-        np.mean(
-            (
-                windows[prediction_columns].to_numpy(dtype=float)
-                - windows[list(target_columns)].to_numpy(dtype=float)
-            )
-            ** 2,
-            axis=1,
-        )
+    windows = _forecast_windows_with_rmse(
+        prediction_table, prediction_columns, target_columns
     )
     if not np.isfinite(windows["issue_rmse"]).all():
         raise ValueError("Per-issue forecast-window RMSE contains non-finite values")
@@ -1898,6 +1889,163 @@ def forecast_window_figures(
     }
 
 
+def forecast_window_figure_at_issue_time(
+    prediction_table: pd.DataFrame,
+    context_series: pd.DataFrame,
+    issue_time: pd.Timestamp | str,
+    *,
+    water_level_column: str,
+    imputed_column: str,
+    prediction_columns: Sequence[str],
+    target_columns: Sequence[str],
+    horizons: Sequence[int],
+    label_prefix: str,
+) -> go.Figure:
+    """Build the forecast-window chart for one chosen issue time.
+
+    Unlike :func:`forecast_window_figures`, the target-station context does not
+    have to be complete: missing hours are left as gaps in the ground-truth
+    line, and imputed hours are drawn as separate markers instead of as ground
+    truth. The slider reaches every neighbouring issue time in the prediction
+    table, regardless of its context completeness.
+
+    Args:
+        prediction_table: Per-issue frame with ``issue_time``, actual targets,
+            and correspondingly ordered prediction columns.
+        context_series: Timestamp-indexed target-station water-level and
+            imputation frame.
+        issue_time: Issue time to chart; naive values are interpreted as UTC.
+        water_level_column: Column holding the target station's water level.
+        imputed_column: Column marking imputed target-station rows.
+        prediction_columns: Ordered direct-forecast prediction columns.
+        target_columns: Ordered actual target columns.
+        horizons: Ordered forecast horizons, in hours.
+        label_prefix: Model label used in the chart title.
+
+    Returns:
+        A Plotly figure centered on ``issue_time`` with a neighbouring-issue
+        slider.
+
+    Raises:
+        ValueError: If ``issue_time`` is not an issue time of the prediction
+            table.
+    """
+    prediction_columns = list(prediction_columns)
+    windows = _forecast_windows_with_rmse(
+        prediction_table, prediction_columns, target_columns
+    )
+    issue_time = _utc_timestamp(issue_time)
+    matching_rows = windows.index[windows["issue_time"].eq(issue_time)]
+    if len(matching_rows) == 0:
+        nearest_issue_times = (
+            windows.assign(distance=(windows["issue_time"] - issue_time).abs())
+            .nsmallest(3, "distance")["issue_time"]
+            .sort_values()
+        )
+        raise ValueError(
+            f"Issue time {issue_time.isoformat()} is not in the prediction table; "
+            "nearest available issue times: "
+            + ", ".join(time.isoformat() for time in nearest_issue_times)
+        )
+    window_row = windows.loc[matching_rows[0]]
+
+    context = _context_window(issue_time, context_series)
+    is_imputed = context[imputed_column].eq(True).to_numpy()
+    water_levels = context[water_level_column].to_numpy(dtype=float)
+    figure = _forecast_window_figure(
+        window_row,
+        context.assign(
+            **{water_level_column: np.where(is_imputed, np.nan, water_levels)}
+        ),
+        f"Selected {label_prefix}",
+        prediction_table=windows,
+        context_by_row=dict.fromkeys(windows.index),
+        water_level_column=water_level_column,
+        prediction_columns=prediction_columns,
+        horizons=horizons,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=context.index[is_imputed],
+            y=water_levels[is_imputed],
+            mode="markers",
+            name="Imputed",
+            marker={"symbol": "x"},
+            hovertemplate="Valid time=%{x}<br>Imputed=%{y:.3f}<extra></extra>",
+        )
+    )
+    return figure
+
+
+def _forecast_windows_with_rmse(
+    prediction_table: pd.DataFrame,
+    prediction_columns: Sequence[str],
+    target_columns: Sequence[str],
+) -> pd.DataFrame:
+    """Return the prediction table with UTC issue times and per-issue RMSE.
+
+    Args:
+        prediction_table: Per-issue frame with ``issue_time``, actual targets,
+            and correspondingly ordered prediction columns.
+        prediction_columns: Ordered direct-forecast prediction columns.
+        target_columns: Ordered actual target columns.
+
+    Returns:
+        A copy of ``prediction_table`` with an added ``issue_rmse`` column.
+    """
+    windows = prediction_table.copy()
+    windows["issue_time"] = pd.to_datetime(windows["issue_time"], utc=True)
+    windows["issue_rmse"] = np.sqrt(
+        np.mean(
+            (
+                windows[list(prediction_columns)].to_numpy(dtype=float)
+                - windows[list(target_columns)].to_numpy(dtype=float)
+            )
+            ** 2,
+            axis=1,
+        )
+    )
+    return windows
+
+
+def _utc_timestamp(timestamp: pd.Timestamp | str) -> pd.Timestamp:
+    """Return ``timestamp`` as a UTC timestamp, treating naive values as UTC.
+
+    Args:
+        timestamp: Timestamp or timestamp string.
+
+    Returns:
+        The timezone-aware UTC timestamp.
+    """
+    timestamp = pd.Timestamp(timestamp)
+    if timestamp.tz is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
+
+
+def _context_window(
+    issue_time: pd.Timestamp, context_series: pd.DataFrame
+) -> pd.DataFrame:
+    """Return the hourly context around an issue time, missing hours as NaN.
+
+    Args:
+        issue_time: Forecast issue timestamp to center the context window on.
+        context_series: Timestamp-indexed water-level and imputation frame.
+
+    Returns:
+        ``context_series`` reindexed from ``_CONTEXT_WINDOW_HOURS`` before
+        through ``_CONTEXT_WINDOW_HOURS`` after ``issue_time``.
+    """
+    issue_time = _utc_timestamp(issue_time)
+    return context_series.reindex(
+        pd.date_range(
+            issue_time - pd.to_timedelta(_CONTEXT_WINDOW_HOURS, unit="h"),
+            issue_time + pd.to_timedelta(_CONTEXT_WINDOW_HOURS, unit="h"),
+            freq="h",
+        )
+    )
+
+
 def _complete_context(
     issue_time: pd.Timestamp,
     context_series: pd.DataFrame,
@@ -1917,17 +2065,7 @@ def _complete_context(
         The reindexed context window, or ``None`` if any hour is missing or
         imputed.
     """
-    issue_time = pd.Timestamp(issue_time)
-    if issue_time.tz is None:
-        issue_time = issue_time.tz_localize("UTC")
-    else:
-        issue_time = issue_time.tz_convert("UTC")
-    expected_times = pd.date_range(
-        issue_time - pd.to_timedelta(_CONTEXT_WINDOW_HOURS, unit="h"),
-        issue_time + pd.to_timedelta(_CONTEXT_WINDOW_HOURS, unit="h"),
-        freq="h",
-    )
-    context = context_series.reindex(expected_times)
+    context = _context_window(issue_time, context_series)
     if (
         len(context) != 2 * _CONTEXT_WINDOW_HOURS + 1
         or not context[water_level_column].notna().all()
@@ -1955,7 +2093,7 @@ def _forecast_window_figure(
 
     Args:
         window_row: Prediction-table row the chart is centered on.
-        context: Complete ground-truth context for the issue.
+        context: Ground-truth context for the issue.
         label: Complete chart label to prefix the title with.
         prediction_table: Full per-issue prediction table.
         context_by_row: Prediction-table indices with a complete context.

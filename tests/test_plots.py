@@ -14,6 +14,7 @@ from src.plots import (
     cv_error_boxplots_figure,
     feature_subset_best_comparison_figure,
     feature_subset_candidate_distribution_figure,
+    forecast_window_figure_at_issue_time,
     forecast_window_figures,
     horizon_comparison_figure,
     model_feature_subset_candidate_distribution_figure,
@@ -801,6 +802,64 @@ def test_forecast_window_figures_requires_two_eligible_issue_times() -> None:
 
     with pytest.raises(ValueError, match="at least two issue timestamps"):
         _forecast_window_figures(fixture, short_context)
+
+
+def _forecast_window_figure_at_issue_time(
+    fixture: _ForecastWindowFixture,
+    issue_time: str,
+    context_series: pd.DataFrame | None = None,
+) -> go.Figure:
+    return forecast_window_figure_at_issue_time(
+        fixture.prediction_table,
+        fixture.context_series if context_series is None else context_series,
+        issue_time,
+        water_level_column=fixture.water_level_column,
+        imputed_column=fixture.imputed_column,
+        prediction_columns=fixture.prediction_columns,
+        target_columns=fixture.target_columns,
+        horizons=fixture.horizons,
+        label_prefix="Ridge",
+    )
+
+
+def test_forecast_window_figure_at_issue_time_plots_incomplete_context() -> None:
+    fixture = _forecast_window_fixture()
+    missing_time = pd.Timestamp("2023-12-31 20:00", tz="UTC")
+    imputed_time = pd.Timestamp("2023-12-31 22:00", tz="UTC")
+    context_series = fixture.context_series.drop(missing_time)
+    context_series.loc[imputed_time, fixture.imputed_column] = True
+    # Context ends before the +48h edge of the chosen issue time's window.
+    context_series = context_series.loc[:"2024-01-02 12:00"]
+
+    figure = _forecast_window_figure_at_issue_time(
+        fixture, "2024-01-01 06:00", context_series
+    )
+
+    title = figure.layout.title.text
+    assert "Selected Ridge forecast window" in title
+    assert "2024-01-01T06:00:00+00:00" in title
+    assert "24-hour RMSE: 2.0000" in title
+    assert [trace.name for trace in figure.data] == [
+        "Ground truth",
+        "Prediction",
+        "Imputed",
+    ]
+    ground_truth = pd.Series(figure.data[0].y, index=pd.DatetimeIndex(figure.data[0].x))
+    assert len(ground_truth) == 97
+    assert np.isnan(ground_truth[missing_time])
+    assert np.isnan(ground_truth[imputed_time])
+    assert ground_truth.loc["2024-01-02 13:00":].isna().all()
+    assert list(pd.DatetimeIndex(figure.data[2].x)) == [imputed_time]
+    # Both neighbouring issue times within twelve hours are on the slider.
+    assert len(figure.frames) == 2
+    assert figure.layout.sliders[0].active == 1
+
+
+def test_forecast_window_figure_at_issue_time_rejects_unknown_issue_time() -> None:
+    fixture = _forecast_window_fixture()
+
+    with pytest.raises(ValueError, match="nearest available issue times"):
+        _forecast_window_figure_at_issue_time(fixture, "2024-01-01 03:00")
 
 
 def test_arima_correlations_reduce_lags_and_handle_constant_differences() -> None:
